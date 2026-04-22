@@ -638,6 +638,55 @@ def detect_ingress_owner(bundle: list[Module]) -> Module:
     return owners[0]
 
 
+def needs_capabilities(module: Module) -> list[str]:
+    return [str(item) for item in module.manifest.get("needs", {}).get("capabilities", [])]
+
+
+def capability_providers(capability: str, modules: dict[str, Module]) -> list[str]:
+    return sorted(name for name, module in modules.items() if capability in module.capabilities)
+
+
+def validate_capability_needs_for_install(
+    candidates: list[Module],
+    installed_modules: dict[str, Module],
+    discoverable_modules: dict[str, Module],
+) -> list[str]:
+    """Check that every `needs.capabilities` entry is satisfiable.
+
+    A capability is satisfied when any already-installed module OR any other
+    module in the same install batch provides it. Returns a list of error
+    lines (empty means all needs can be met).
+    """
+    effective: dict[str, Module] = dict(installed_modules)
+    for candidate in candidates:
+        effective[candidate.name] = candidate
+
+    errors: list[str] = []
+    for candidate in candidates:
+        for capability in needs_capabilities(candidate):
+            providers = [
+                name
+                for name, module in effective.items()
+                if name != candidate.name and capability in module.capabilities
+            ]
+            if providers:
+                continue
+            suggestions = [
+                name
+                for name, module in discoverable_modules.items()
+                if name != candidate.name and capability in module.capabilities
+            ]
+            if suggestions:
+                errors.append(
+                    f"{candidate.name} needs capability `{capability}`; install one of: {', '.join(sorted(suggestions))}"
+                )
+            else:
+                errors.append(
+                    f"{candidate.name} needs capability `{capability}` but no discoverable module provides it"
+                )
+    return errors
+
+
 def detect_capability_conflicts(candidate_modules: list[Module], installed_modules: dict[str, Module]) -> list[str]:
     combined: dict[str, Module] = dict(installed_modules)
     for module in candidate_modules:
@@ -1057,6 +1106,9 @@ def cmd_install(args: argparse.Namespace) -> int:
         conflicts = detect_capability_conflicts(bundle_modules, installed_modules)
         if conflicts:
             raise SystemExit("Cannot install bundle because of capability conflicts: " + "; ".join(conflicts))
+        unmet = validate_capability_needs_for_install(bundle_modules, installed_modules, modules)
+        if unmet:
+            raise SystemExit("Cannot install bundle because of unmet capability needs:\n  - " + "\n  - ".join(unmet))
         if not args.skip_install_commands:
             for module in bundle_modules:
                 execute_install_commands(module)
@@ -1076,6 +1128,9 @@ def cmd_install(args: argparse.Namespace) -> int:
     conflicts = detect_capability_conflicts([module], installed_modules)
     if conflicts:
         raise SystemExit("Cannot install module because of capability conflicts: " + "; ".join(conflicts))
+    unmet = validate_capability_needs_for_install([module], installed_modules, modules)
+    if unmet:
+        raise SystemExit("Cannot install module because of unmet capability needs:\n  - " + "\n  - ".join(unmet))
     if not args.skip_install_commands:
         execute_install_commands(module)
     install_modules([module])
@@ -1098,6 +1153,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
     conflicts = detect_capability_conflicts(bundle, installed_modules)
     if conflicts:
         raise SystemExit("Cannot run setup because of capability conflicts: " + "; ".join(conflicts))
+    unmet = validate_capability_needs_for_install(bundle, installed_modules, modules)
+    if unmet:
+        raise SystemExit("Cannot run setup because of unmet capability needs:\n  - " + "\n  - ".join(unmet))
     interactive = setup_is_interactive(args)
     if interactive:
         print_setup_preflight(bundle)

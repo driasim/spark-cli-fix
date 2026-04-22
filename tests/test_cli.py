@@ -32,6 +32,8 @@ from spark_cli.cli import (
     load_json,
     module_log_path,
     module_secret_env_bindings,
+    needs_capabilities,
+    validate_capability_needs_for_install,
     persist_keychain_secrets,
     split_secret_bindings,
     store_secret,
@@ -40,6 +42,7 @@ from spark_cli.cli import (
     Module,
     MODULE_CONFIG_DIR,
     REGISTRY_PATH,
+    capability_providers,
     detect_uninstall_blockers,
     detect_capability_conflicts,
     detect_ingress_owner,
@@ -83,6 +86,80 @@ def make_module(name: str, capabilities: list[str]) -> Module:
 
 
 class SparkCliTests(unittest.TestCase):
+    def test_needs_capabilities_reads_manifest_block(self) -> None:
+        module = Module(
+            name="consumer",
+            path=Path("C:/tmp/consumer"),
+            manifest={
+                "module": {"name": "consumer", "version": "0.1.0", "kind": "service", "plane": "ingress"},
+                "needs": {"capabilities": ["memory.store", "spark.runtime"]},
+            },
+        )
+        self.assertEqual(needs_capabilities(module), ["memory.store", "spark.runtime"])
+
+    def test_capability_providers_returns_sorted_names(self) -> None:
+        alpha = make_module("alpha", ["memory.store"])
+        beta = make_module("beta", ["memory.store", "other.thing"])
+        providers = capability_providers("memory.store", {alpha.name: alpha, beta.name: beta})
+        self.assertEqual(providers, ["alpha", "beta"])
+
+    def test_validate_capability_needs_satisfied_by_same_batch(self) -> None:
+        gateway = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"capabilities": ["spark.runtime"]},
+            },
+        )
+        builder = make_module("spark-intelligence-builder", ["spark.runtime"])
+        errors = validate_capability_needs_for_install([gateway, builder], {}, {})
+        self.assertEqual(errors, [])
+
+    def test_validate_capability_needs_suggests_discoverable_provider(self) -> None:
+        gateway = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"capabilities": ["spark.runtime"]},
+            },
+        )
+        builder = make_module("spark-intelligence-builder", ["spark.runtime"])
+        errors = validate_capability_needs_for_install([gateway], {}, {builder.name: builder})
+        self.assertEqual(
+            errors,
+            ["spark-telegram-bot needs capability `spark.runtime`; install one of: spark-intelligence-builder"],
+        )
+
+    def test_validate_capability_needs_reports_completely_missing(self) -> None:
+        consumer = Module(
+            name="consumer",
+            path=Path("C:/tmp/consumer"),
+            manifest={
+                "module": {"name": "consumer", "version": "0.1.0", "kind": "service", "plane": "ingress"},
+                "needs": {"capabilities": ["nobody.has.this"]},
+            },
+        )
+        errors = validate_capability_needs_for_install([consumer], {}, {})
+        self.assertEqual(
+            errors,
+            ["consumer needs capability `nobody.has.this` but no discoverable module provides it"],
+        )
+
+    def test_validate_capability_needs_accepts_already_installed_provider(self) -> None:
+        gateway = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"capabilities": ["spark.runtime"]},
+            },
+        )
+        builder = make_module("spark-intelligence-builder", ["spark.runtime"])
+        errors = validate_capability_needs_for_install([gateway], {builder.name: builder}, {})
+        self.assertEqual(errors, [])
+
     def test_detect_ingress_owner_returns_single_owner(self) -> None:
         gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
         runtime = make_module("spark-intelligence-builder", ["spark.runtime"])
