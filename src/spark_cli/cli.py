@@ -16,6 +16,8 @@ import tomllib
 
 SPARK_HOME = Path.home() / ".spark"
 STATE_DIR = SPARK_HOME / "state"
+CONFIG_DIR = SPARK_HOME / "config"
+MODULE_CONFIG_DIR = CONFIG_DIR / "modules"
 LOG_DIR = SPARK_HOME / "logs"
 REGISTRY_PATH = STATE_DIR / "installed.json"
 CONFIG_PATH = STATE_DIR / "setup.json"
@@ -82,13 +84,34 @@ class Module:
     def telegram_profile(self) -> dict[str, Any]:
         return dict(self.manifest.get("profiles", {}).get("telegram_starter", {}))
 
+    @property
+    def needed_secrets(self) -> list[str]:
+        return [str(item) for item in self.manifest.get("needs", {}).get("secrets", [])]
+
+    def resolve_secret_definition(self, secret_id: str) -> dict[str, Any]:
+        secret_blocks = self.manifest.get("secrets", {})
+        candidates = [
+            secret_id,
+            secret_id.replace(".", "_"),
+            secret_id.replace("-", "_"),
+        ]
+        for candidate in candidates:
+            block = secret_blocks.get(candidate)
+            if isinstance(block, dict):
+                return dict(block)
+        suffix = secret_id.split(".")[-1].replace("-", "_")
+        for key, block in secret_blocks.items():
+            if str(key).endswith(suffix) and isinstance(block, dict):
+                return dict(block)
+        return {}
+
 
 def load_registry_definition() -> dict[str, Any]:
     return load_json(LOCAL_REGISTRY_PATH, {"modules": {}, "bundles": {}})
 
 
 def ensure_state_dirs() -> None:
-    for path in (SPARK_HOME, STATE_DIR, LOG_DIR):
+    for path in (SPARK_HOME, STATE_DIR, CONFIG_DIR, MODULE_CONFIG_DIR, LOG_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -108,6 +131,108 @@ def load_module(path: Path) -> Module:
     manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
     name = str(manifest.get("module", {}).get("name") or path.name)
     return Module(name=name, path=path, manifest=manifest)
+
+
+def parse_secret_pairs(raw_pairs: list[str] | None) -> dict[str, str]:
+    secrets: dict[str, str] = {}
+    for raw in raw_pairs or []:
+        if "=" not in raw:
+            raise SystemExit(f"Invalid --secret value: {raw}. Expected KEY=VALUE.")
+        key, value = raw.split("=", 1)
+        secrets[key.strip()] = value
+    return secrets
+
+
+def collect_secret_requirements(modules: list[Module]) -> dict[str, dict[str, Any]]:
+    requirements: dict[str, dict[str, Any]] = {}
+    for module in modules:
+        for secret_id in module.needed_secrets:
+            definition = module.resolve_secret_definition(secret_id)
+            requirement = requirements.setdefault(
+                secret_id,
+                {
+                    "prompt": definition.get("prompt") or secret_id,
+                    "required": bool(definition.get("required", True)),
+                    "env_var": definition.get("env_var"),
+                    "modules": [],
+                },
+            )
+            requirement["modules"].append(module.name)
+            if definition.get("required", False):
+                requirement["required"] = True
+            if definition.get("env_var") and not requirement.get("env_var"):
+                requirement["env_var"] = definition.get("env_var")
+    return requirements
+
+
+def collect_secret_values(args: argparse.Namespace, modules: list[Module]) -> dict[str, str]:
+    secret_values = parse_secret_pairs(getattr(args, "secret", None))
+    legacy_map = {
+        "telegram.bot_token": getattr(args, "bot_token", None),
+        "telegram.admin_ids": getattr(args, "admin_telegram_ids", None),
+        "telegram.webhook_secret": getattr(args, "telegram_webhook_secret", None),
+    }
+    for key, value in legacy_map.items():
+        if value:
+            secret_values.setdefault(key, str(value))
+
+    requirements = collect_secret_requirements(modules)
+    missing = [
+        secret_id
+        for secret_id, requirement in requirements.items()
+        if requirement.get("required") and not secret_values.get(secret_id)
+    ]
+    if missing:
+        descriptions = []
+        for secret_id in missing:
+            requirement = requirements[secret_id]
+            descriptions.append(f"{secret_id} ({requirement.get('prompt')})")
+        raise SystemExit("Missing required secrets: " + ", ".join(descriptions))
+    return secret_values
+
+
+def generated_module_env_path(module: Module) -> Path:
+    return MODULE_CONFIG_DIR / f"{module.name}.env"
+
+
+def write_generated_env(path: Path, values: dict[str, str]) -> None:
+    lines = [f"{key}={value}" for key, value in values.items()]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Module], secret_values: dict[str, str]) -> dict[str, dict[str, str]]:
+    gateway = modules_by_name["spark-telegram-bot"]
+    spawner = modules_by_name["spawner-ui"]
+    builder = modules_by_name["spark-intelligence-builder"]
+
+    gateway_env = {
+        "BOT_TOKEN": secret_values.get("telegram.bot_token", ""),
+        "ADMIN_TELEGRAM_IDS": secret_values.get("telegram.admin_ids", ""),
+        "SPARK_BUILDER_REPO": str(builder.path),
+        "SPARK_BUILDER_BRIDGE_MODE": "auto",
+        "SPAWNER_UI_URL": args.spawner_ui_url,
+        "TELEGRAM_GATEWAY_MODE": args.telegram_gateway_mode,
+    }
+    if secret_values.get("telegram.webhook_secret"):
+        gateway_env["TELEGRAM_WEBHOOK_SECRET"] = secret_values["telegram.webhook_secret"]
+    if args.telegram_webhook_url:
+        gateway_env["TELEGRAM_WEBHOOK_URL"] = args.telegram_webhook_url
+
+    relay_base = args.spawner_ui_url
+    if relay_base.endswith(":5173"):
+        relay_base = relay_base[:-4] + "8788"
+    spawner_env = {
+        "MISSION_CONTROL_WEBHOOK_URLS": f"{relay_base}/spawner-events",
+    }
+    if secret_values.get("telegram.webhook_secret"):
+        spawner_env["TELEGRAM_RELAY_SECRET"] = secret_values["telegram.webhook_secret"]
+
+    return {
+        gateway.name: gateway_env,
+        spawner.name: spawner_env,
+        builder.name: {},
+    }
 
 
 def discover_modules() -> dict[str, Module]:
@@ -270,6 +395,34 @@ def install_modules(modules: list[Module]) -> None:
             print("This module declares telegram.ingress and should be the only live Telegram token owner.")
 
 
+def evaluate_module_health(module: Module) -> dict[str, Any]:
+    command = module.healthcheck_command
+    if not command:
+        return {
+            "name": module.name,
+            "version": module.version,
+            "kind": module.kind,
+            "plane": module.plane,
+            "healthy": None,
+            "detail": "no healthcheck declared",
+            "healthcheck_command": None,
+            "failure_hint": None,
+        }
+    result = run_shell(command, module.path)
+    detail = summarize_command_output(result)
+    failure_hint = str(module.manifest.get("healthcheck", {}).get("failure_hint", "")).strip() or None
+    return {
+        "name": module.name,
+        "version": module.version,
+        "kind": module.kind,
+        "plane": module.plane,
+        "healthy": result.returncode == 0,
+        "detail": detail,
+        "healthcheck_command": command,
+        "failure_hint": failure_hint,
+    }
+
+
 def cmd_install(args: argparse.Namespace) -> int:
     ensure_state_dirs()
     modules = discover_modules()
@@ -302,54 +455,32 @@ def cmd_setup(args: argparse.Namespace) -> int:
     conflicts = detect_capability_conflicts(bundle, installed_modules)
     if conflicts:
         raise SystemExit("Cannot run setup because of capability conflicts: " + "; ".join(conflicts))
-
-    if not args.bot_token:
-        raise SystemExit("--bot-token is required for the telegram-starter spike")
-    if not args.admin_telegram_ids:
-        raise SystemExit("--admin-telegram-ids is required for the telegram-starter spike")
+    secret_values = collect_secret_values(args, bundle)
 
     setup_state = {
         "bundle": args.bundle,
         "modules": [module.name for module in bundle],
         "telegram_ingress_owner": ingress_owner.name,
         "configured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "secret_keys": sorted(secret_values.keys()),
     }
     save_json(CONFIG_PATH, setup_state)
     install_modules(bundle)
 
-    gateway = modules["spark-telegram-bot"]
-    gateway_env = {
-        "BOT_TOKEN": args.bot_token,
-        "ADMIN_TELEGRAM_IDS": args.admin_telegram_ids,
-        "SPARK_BUILDER_REPO": str(modules["spark-intelligence-builder"].path),
-        "SPARK_BUILDER_BRIDGE_MODE": "auto",
-        "SPAWNER_UI_URL": args.spawner_ui_url,
-    }
-    if args.telegram_gateway_mode:
-        gateway_env["TELEGRAM_GATEWAY_MODE"] = args.telegram_gateway_mode
-    if args.telegram_webhook_secret:
-        gateway_env["TELEGRAM_WEBHOOK_SECRET"] = args.telegram_webhook_secret
-    if args.telegram_webhook_url:
-        gateway_env["TELEGRAM_WEBHOOK_URL"] = args.telegram_webhook_url
-
-    gateway_env_path = module_env_path(gateway)
-    if gateway_env_path is not None:
-        update_env_file(gateway_env_path, gateway_env)
-
-    spawner = modules["spawner-ui"]
-    spawner_env = {
-        "MISSION_CONTROL_WEBHOOK_URLS": f"{args.spawner_ui_url.replace('5173', '8788')}/spawner-events",
-    }
-    if args.telegram_webhook_secret:
-        spawner_env["TELEGRAM_RELAY_SECRET"] = args.telegram_webhook_secret
-    spawner_env_path = module_env_path(spawner)
-    if spawner_env_path is not None:
-        update_env_file(spawner_env_path, spawner_env)
+    generated_envs = build_module_envs(args, modules, secret_values)
+    for module in bundle:
+        env_values = generated_envs.get(module.name, {})
+        generated_path = generated_module_env_path(module)
+        write_generated_env(generated_path, env_values)
+        env_path = module_env_path(module)
+        if env_path is not None and env_values:
+            update_env_file(env_path, env_values)
 
     print("Spark setup complete.")
     print(f"Bundle: {args.bundle}")
     print(f"Telegram ingress owner: {ingress_owner.name}")
     print("Bot token routed only to spark-telegram-bot.")
+    print(f"Generated module config dir: {MODULE_CONFIG_DIR}")
     return 0
 
 
@@ -377,39 +508,73 @@ def summarize_command_output(result: subprocess.CompletedProcess[str]) -> str:
     return lines[-1]
 
 
-def cmd_status(_: argparse.Namespace) -> int:
+def collect_status_payload() -> dict[str, Any]:
     ensure_state_dirs()
     installed = load_json(REGISTRY_PATH, {})
     setup_state = load_json(CONFIG_PATH, {})
     if not installed:
-        print("No installed Spark modules recorded. Run `spark setup telegram-starter` first.")
-        return 1
+        return {
+            "ok": False,
+            "summary": "No installed Spark modules recorded.",
+            "repair": "Run `spark setup telegram-starter` first.",
+            "modules": [],
+        }
 
     modules = {name: load_module(Path(data["path"])) for name, data in installed.items()}
-    print("Spark CLI spike status")
-    ingress_owner = setup_state.get("telegram_ingress_owner")
+    module_results = [evaluate_module_health(module) for module in modules.values()]
+    return {
+        "ok": all(item["healthy"] is not False for item in module_results),
+        "summary": "Spark CLI spike status",
+        "telegram_ingress_owner": setup_state.get("telegram_ingress_owner"),
+        "modules": module_results,
+        "tracked_pids": load_pids(),
+        "config_dir": str(CONFIG_DIR),
+    }
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    payload = collect_status_payload()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0 if payload.get("ok") else 1
+
+    if not payload.get("modules"):
+        print(payload["summary"])
+        print(payload["repair"])
+        return 1
+
+    print(payload["summary"])
+    ingress_owner = payload.get("telegram_ingress_owner")
     if ingress_owner:
         print(f"Telegram ingress owner: {ingress_owner}")
     print("")
 
     exit_code = 0
-    for module in modules.values():
-        command = module.healthcheck_command
-        if not command:
-            print(f"[SKIP] {module.name:<26} no healthcheck declared")
-            continue
-        result = run_shell(command, module.path)
-        ok = result.returncode == 0
-        marker = "[OK]" if ok else "[ERR]"
-        detail = summarize_command_output(result)
-        if not ok:
-            failure_hint = str(module.manifest.get("healthcheck", {}).get("failure_hint", "")).strip()
-            if failure_hint:
-                detail = f"{detail} -- {failure_hint}"
-        print(f"{marker} {module.name:<26} {detail}")
-        if not ok:
+    for module in payload["modules"]:
+        healthy = module["healthy"]
+        if healthy is None:
+            marker = "[SKIP]"
+        elif healthy:
+            marker = "[OK]"
+        else:
+            marker = "[ERR]"
+        detail = str(module["detail"])
+        if healthy is False and module.get("failure_hint"):
+            detail = f"{detail} -- {module['failure_hint']}"
+        print(f"{marker} {module['name']:<26} {detail}")
+        if healthy is False:
             exit_code = 1
     return exit_code
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    payload = collect_status_payload()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print("Spark CLI spike doctor")
+        print(json.dumps(payload, indent=2))
+    return 0 if payload.get("ok") else 1
 
 
 def load_pids() -> dict[str, Any]:
@@ -513,6 +678,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     setup_parser = subparsers.add_parser("setup", help="Configure a starter bundle")
     setup_parser.add_argument("bundle", choices=sorted(load_registry_definition().get("bundles", {}).keys()))
+    setup_parser.add_argument("--secret", action="append", help="Provide manifest secret values as key=value")
     setup_parser.add_argument("--bot-token")
     setup_parser.add_argument("--admin-telegram-ids")
     setup_parser.add_argument("--telegram-gateway-mode", choices=["auto", "polling", "webhook"], default="auto")
@@ -522,7 +688,12 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.set_defaults(func=cmd_setup)
 
     status_parser = subparsers.add_parser("status", help="Run module healthchecks")
+    status_parser.add_argument("--json", action="store_true")
     status_parser.set_defaults(func=cmd_status)
+
+    doctor_parser = subparsers.add_parser("doctor", help="Run diagnostic status and emit structured output")
+    doctor_parser.add_argument("--json", action="store_true")
+    doctor_parser.set_defaults(func=cmd_doctor)
 
     start_parser = subparsers.add_parser("start", help="Start startable modules")
     start_parser.add_argument("target", nargs="?")

@@ -8,10 +8,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from spark_cli.cli import (
+    build_module_envs,
+    collect_secret_requirements,
+    collect_secret_values,
     Module,
+    MODULE_CONFIG_DIR,
     detect_capability_conflicts,
     detect_ingress_owner,
     expand_targets,
+    generated_module_env_path,
     print_install_summary,
     resolve_bundle_names,
     resolve_install_target,
@@ -125,6 +130,75 @@ class SparkCliTests(unittest.TestCase):
             conflicts,
             ["multiple telegram ingress owners declared: other-telegram-gateway, spark-telegram-bot"],
         )
+
+    def test_collect_secret_requirements_maps_manifest_secret_blocks(self) -> None:
+        module = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"secrets": ["telegram.bot_token", "telegram.admin_ids"]},
+                "secrets": {
+                    "telegram_bot_token": {"prompt": "Bot token", "required": True, "env_var": "BOT_TOKEN"},
+                    "telegram_admin_ids": {"prompt": "Admin ids", "required": True, "env_var": "ADMIN_TELEGRAM_IDS"},
+                },
+            },
+        )
+        requirements = collect_secret_requirements([module])
+        self.assertEqual(requirements["telegram.bot_token"]["env_var"], "BOT_TOKEN")
+        self.assertEqual(requirements["telegram.admin_ids"]["env_var"], "ADMIN_TELEGRAM_IDS")
+
+    def test_collect_secret_values_accepts_generic_secret_flags(self) -> None:
+        module = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"secrets": ["telegram.bot_token"]},
+                "secrets": {
+                    "telegram_bot_token": {"prompt": "Bot token", "required": True, "env_var": "BOT_TOKEN"},
+                },
+            },
+        )
+
+        class Args:
+            secret = ["telegram.bot_token=abc"]
+            bot_token = None
+            admin_telegram_ids = None
+            telegram_webhook_secret = None
+
+        values = collect_secret_values(Args(), [module])
+        self.assertEqual(values["telegram.bot_token"], "abc")
+
+    def test_generated_module_env_path_uses_canonical_module_config_dir(self) -> None:
+        module = make_module("spawner-ui", ["mission.execution"])
+        self.assertEqual(generated_module_env_path(module), MODULE_CONFIG_DIR / "spawner-ui.env")
+
+    def test_build_module_envs_routes_telegram_secret_only_to_gateway(self) -> None:
+        gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
+        builder = make_module("spark-intelligence-builder", ["spark.runtime"])
+        spawner = make_module("spawner-ui", ["mission.execution"])
+
+        class Args:
+            spawner_ui_url = "http://127.0.0.1:5173"
+            telegram_gateway_mode = "auto"
+            telegram_webhook_url = None
+
+        envs = build_module_envs(
+            Args(),
+            {
+                gateway.name: gateway,
+                builder.name: builder,
+                spawner.name: spawner,
+            },
+            {
+                "telegram.bot_token": "abc",
+                "telegram.admin_ids": "123",
+                "telegram.webhook_secret": "secret",
+            },
+        )
+        self.assertEqual(envs["spark-telegram-bot"]["BOT_TOKEN"], "abc")
+        self.assertNotIn("BOT_TOKEN", envs["spawner-ui"])
 
 
 if __name__ == "__main__":
