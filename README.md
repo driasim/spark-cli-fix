@@ -26,7 +26,7 @@ python -m spark_cli.cli setup telegram-starter --secret telegram.bot_token=<toke
 python -m spark_cli.cli status
 python -m spark_cli.cli status --json
 python -m spark_cli.cli doctor --json
-python -m spark_cli.cli update telegram-starter
+python -m spark_cli.cli update telegram-starter --skip-install-commands
 python -m spark_cli.cli uninstall spawner-ui
 python -m spark_cli.cli start
 python -m spark_cli.cli stop
@@ -66,7 +66,12 @@ The current supported ownership rule remains:
 
 ## Lifecycle
 
-- `install <module|bundle>` records modules from the local registry or a local repo path
-- `setup <bundle>` installs the bundle and writes generated module config
-- `update <module|bundle>` refreshes installed metadata and reapplies generated env to module `.env` files
+- `install <module|bundle>` records modules from the local registry or a local repo path and can execute manifest `[install.dev]` commands
+- `setup <bundle>` installs the bundle, can execute manifest install commands, and writes generated module config
+- `update <module|bundle>` refreshes installed metadata, can rerun manifest install commands, and reapplies generated env to module `.env` files
 - `uninstall <module|bundle>` removes installed state, deletes generated module env files, removes managed `.env` blocks, and repairs bundle setup state
+
+### Safety Flags
+
+- `--skip-install-commands`: validate registry and state flow without running manifest `[install.dev]` commands
+- `uninstall --force`: bypass dependency protection when another installed module still lists the target in `needs.modules`

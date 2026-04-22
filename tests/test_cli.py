@@ -13,8 +13,10 @@ from spark_cli.cli import (
     collect_secret_values,
     Module,
     MODULE_CONFIG_DIR,
+    detect_uninstall_blockers,
     detect_capability_conflicts,
     detect_ingress_owner,
+    execute_install_commands,
     expand_targets,
     generated_module_env_path,
     remove_managed_env_block,
@@ -134,6 +136,23 @@ class SparkCliTests(unittest.TestCase):
             ["multiple telegram ingress owners declared: other-telegram-gateway, spark-telegram-bot"],
         )
 
+    def test_detect_uninstall_blockers_respects_needs_modules(self) -> None:
+        builder = Module(
+            name="spark-intelligence-builder",
+            path=Path("C:/tmp/spark-intelligence-builder"),
+            manifest={"module": {"name": "spark-intelligence-builder", "version": "0.1.0", "kind": "runtime", "plane": "runtime"}},
+        )
+        gateway = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"modules": ["spark-intelligence-builder"]},
+            },
+        )
+        blockers = detect_uninstall_blockers([builder], {builder.name: builder, gateway.name: gateway})
+        self.assertEqual(blockers, ["spark-telegram-bot depends on spark-intelligence-builder"])
+
     def test_collect_secret_requirements_maps_manifest_secret_blocks(self) -> None:
         module = Module(
             name="spark-telegram-bot",
@@ -212,6 +231,27 @@ class SparkCliTests(unittest.TestCase):
             )
             remove_managed_env_block(env_path)
             self.assertEqual(env_path.read_text(encoding="utf-8"), "KEEP=1\n")
+
+    def test_execute_install_commands_runs_manifest_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module_path = Path(tmp_dir)
+            marker_path = module_path / "installed.txt"
+            module = Module(
+                name="test-module",
+                path=module_path,
+                manifest={
+                    "module": {"name": "test-module", "version": "0.1.0", "kind": "service", "plane": "execution"},
+                    "install": {
+                        "dev": {
+                            "commands": [
+                                f'python -c "from pathlib import Path; Path(r\'{marker_path}\').write_text(\'ok\', encoding=\'utf-8\')"'
+                            ]
+                        }
+                    },
+                },
+            )
+            execute_install_commands(module)
+            self.assertEqual(marker_path.read_text(encoding="utf-8"), "ok")
 
     def test_update_setup_state_after_uninstall_clears_empty_setup(self) -> None:
         original = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else None

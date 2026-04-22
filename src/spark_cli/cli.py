@@ -49,6 +49,10 @@ class Module:
         return [str(item) for item in self.manifest.get("provides", {}).get("capabilities", [])]
 
     @property
+    def needs_modules(self) -> list[str]:
+        return [str(item) for item in self.manifest.get("needs", {}).get("modules", [])]
+
+    @property
     def claims(self) -> dict[str, list[Any]]:
         return {
             "secrets": list(self.manifest.get("claims", {}).get("secrets", [])),
@@ -79,6 +83,11 @@ class Module:
         if not ready:
             return None
         return str(ready)
+
+    @property
+    def install_commands(self) -> list[str]:
+        commands = self.manifest.get("install", {}).get("dev", {}).get("commands", [])
+        return [str(command) for command in commands]
 
     @property
     def telegram_profile(self) -> dict[str, Any]:
@@ -430,6 +439,16 @@ def install_modules(modules: list[Module]) -> None:
             print("This module declares telegram.ingress and should be the only live Telegram token owner.")
 
 
+def execute_install_commands(module: Module) -> None:
+    for command in module.install_commands:
+        print(f"Running install command for {module.name}: {command}")
+        result = run_shell(command, module.path)
+        if result.returncode != 0:
+            raise SystemExit(
+                f"{module.name} install command failed: {summarize_command_output(result)}"
+            )
+
+
 def run_module_hook(module: Module, hook_name: str) -> None:
     command = module.hook_command(hook_name)
     if not command:
@@ -476,6 +495,18 @@ def resolve_installed_modules() -> dict[str, Module]:
     return {name: load_module(Path(data["path"])) for name, data in installed.items()}
 
 
+def detect_uninstall_blockers(removing_modules: list[Module], installed_modules: dict[str, Module]) -> list[str]:
+    removing_names = {module.name for module in removing_modules}
+    blockers: list[str] = []
+    for module in installed_modules.values():
+        if module.name in removing_names:
+            continue
+        for dependency in module.needs_modules:
+            if dependency in removing_names:
+                blockers.append(f"{module.name} depends on {dependency}")
+    return blockers
+
+
 def evaluate_module_health(module: Module) -> dict[str, Any]:
     command = module.healthcheck_command
     if not command:
@@ -515,12 +546,17 @@ def cmd_install(args: argparse.Namespace) -> int:
         conflicts = detect_capability_conflicts(bundle_modules, installed_modules)
         if conflicts:
             raise SystemExit("Cannot install bundle because of capability conflicts: " + "; ".join(conflicts))
+        if not args.skip_install_commands:
+            for module in bundle_modules:
+                execute_install_commands(module)
         install_modules(bundle_modules)
         return 0
     module = resolve_install_target(args.target, modules)
     conflicts = detect_capability_conflicts([module], installed_modules)
     if conflicts:
         raise SystemExit("Cannot install module because of capability conflicts: " + "; ".join(conflicts))
+    if not args.skip_install_commands:
+        execute_install_commands(module)
     install_modules([module])
     return 0
 
@@ -544,6 +580,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
         "secret_keys": sorted(secret_values.keys()),
     }
     save_json(CONFIG_PATH, setup_state)
+    if not args.skip_install_commands:
+        for module in bundle:
+            execute_install_commands(module)
     install_modules(bundle)
 
     generated_envs = build_module_envs(args, modules, secret_values)
@@ -764,6 +803,8 @@ def cmd_update(args: argparse.Namespace) -> int:
         return 0
     print_install_summary(modules)
     for module in modules:
+        if not args.skip_install_commands:
+            execute_install_commands(module)
         run_module_hook(module, "post_install")
         install_module_record(module)
         sync_generated_env_to_module(module)
@@ -777,6 +818,10 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     if not modules:
         print("No installed Spark modules recorded.")
         return 0
+    installed_modules = resolve_installed_modules()
+    blockers = detect_uninstall_blockers(modules, installed_modules)
+    if blockers and not args.force:
+        raise SystemExit("Cannot uninstall because other installed modules depend on it: " + "; ".join(blockers))
 
     pids = load_pids()
     removed_names: list[str] = []
@@ -810,10 +855,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     install_parser = subparsers.add_parser("install", help="Install a module by registry name or local repo path")
     install_parser.add_argument("target")
+    install_parser.add_argument("--skip-install-commands", action="store_true")
     install_parser.set_defaults(func=cmd_install)
 
     setup_parser = subparsers.add_parser("setup", help="Configure a starter bundle")
     setup_parser.add_argument("bundle", choices=sorted(load_registry_definition().get("bundles", {}).keys()))
+    setup_parser.add_argument("--skip-install-commands", action="store_true")
     setup_parser.add_argument("--secret", action="append", help="Provide manifest secret values as key=value")
     setup_parser.add_argument("--bot-token")
     setup_parser.add_argument("--admin-telegram-ids")
@@ -833,10 +880,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     update_parser = subparsers.add_parser("update", help="Refresh installed modules from their current source paths")
     update_parser.add_argument("target", nargs="?")
+    update_parser.add_argument("--skip-install-commands", action="store_true")
     update_parser.set_defaults(func=cmd_update)
 
     uninstall_parser = subparsers.add_parser("uninstall", help="Remove installed modules from Spark state and generated config")
     uninstall_parser.add_argument("target", nargs="?")
+    uninstall_parser.add_argument("--force", action="store_true")
     uninstall_parser.set_defaults(func=cmd_uninstall)
 
     start_parser = subparsers.add_parser("start", help="Start startable modules")
