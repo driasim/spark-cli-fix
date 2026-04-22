@@ -18,6 +18,8 @@ from spark_cli.cli import (
     detect_runtime_binary,
     install_module_record,
     load_json,
+    module_log_path,
+    tail_log_lines,
     Module,
     MODULE_CONFIG_DIR,
     REGISTRY_PATH,
@@ -469,6 +471,28 @@ class SparkCliTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as error:
             collect_secret_values(Args(), [module], interactive=False)
         self.assertIn("Missing required secrets", str(error.exception))
+
+    def test_tail_log_lines_returns_trailing_slice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / "process.log"
+            log_path.write_text("\n".join(f"line-{n}" for n in range(1, 11)) + "\n", encoding="utf-8")
+            last_three = tail_log_lines(log_path, 3)
+            self.assertEqual(last_three, ["line-8\n", "line-9\n", "line-10\n"])
+
+    def test_tail_log_lines_returns_all_when_lines_is_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / "process.log"
+            log_path.write_text("a\nb\nc\n", encoding="utf-8")
+            self.assertEqual(tail_log_lines(log_path, 0), ["a\n", "b\n", "c\n"])
+
+    def test_tail_log_lines_empty_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            self.assertEqual(tail_log_lines(Path(tmp_dir) / "missing.log", 50), [])
+
+    def test_module_log_path_points_under_spark_log_dir(self) -> None:
+        path = module_log_path("spark-telegram-bot")
+        self.assertEqual(path.name, "process.log")
+        self.assertEqual(path.parent.name, "spark-telegram-bot")
 
     def test_remove_managed_env_block_strips_only_managed_section(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

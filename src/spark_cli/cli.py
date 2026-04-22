@@ -1247,6 +1247,51 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def module_log_path(module_name: str) -> Path:
+    return LOG_DIR / module_name / "process.log"
+
+
+def tail_log_lines(path: Path, line_count: int) -> list[str]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        lines = handle.readlines()
+    if line_count <= 0:
+        return lines
+    return lines[-line_count:]
+
+
+def follow_log_file(path: Path) -> None:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        handle.seek(0, os.SEEK_END)
+        try:
+            while True:
+                chunk = handle.readline()
+                if not chunk:
+                    time.sleep(0.5)
+                    continue
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+        except KeyboardInterrupt:
+            return
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    installed = resolve_installed_modules()
+    if args.target not in installed:
+        raise SystemExit(f"Unknown installed module: {args.target}")
+    path = module_log_path(args.target)
+    if not path.exists():
+        print(f"No logs yet for {args.target} at {path}")
+        print("Start the module first with `spark start`.")
+        return 1
+    for line in tail_log_lines(path, args.lines):
+        sys.stdout.write(line if line.endswith("\n") else line + "\n")
+    if args.follow:
+        follow_log_file(path)
+    return 0
+
+
 def cmd_update(args: argparse.Namespace) -> int:
     ensure_state_dirs()
     modules = resolve_installed_target_modules(args.target)
@@ -1361,6 +1406,12 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser = subparsers.add_parser("stop", help="Stop tracked Spark processes")
     stop_parser.add_argument("target", nargs="?")
     stop_parser.set_defaults(func=cmd_stop)
+
+    logs_parser = subparsers.add_parser("logs", help="Show process logs for an installed module")
+    logs_parser.add_argument("target")
+    logs_parser.add_argument("-n", "--lines", type=int, default=200, help="Lines of history to show before following (default: 200, 0 = all)")
+    logs_parser.add_argument("-f", "--follow", action="store_true", help="Tail the log and stream new lines")
+    logs_parser.set_defaults(func=cmd_logs)
 
     return parser
 
