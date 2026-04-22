@@ -29,6 +29,8 @@ from spark_cli.cli import (
     print_install_summary,
     resolve_bundle_names,
     resolve_install_target,
+    resolve_start_modules,
+    resolve_stop_module_names,
     summarize_command_output,
     update_setup_state_after_uninstall,
     update_env_file,
@@ -157,6 +159,84 @@ class SparkCliTests(unittest.TestCase):
         )
         blockers = detect_uninstall_blockers([builder], {builder.name: builder, gateway.name: gateway})
         self.assertEqual(blockers, ["spark-telegram-bot depends on spark-intelligence-builder"])
+
+    def test_resolve_start_modules_orders_dependencies_before_gateway(self) -> None:
+        builder = Module(
+            name="spark-intelligence-builder",
+            path=Path("C:/tmp/spark-intelligence-builder"),
+            manifest={"module": {"name": "spark-intelligence-builder", "version": "0.1.0", "kind": "runtime", "plane": "runtime"}},
+        )
+        spawner = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={"module": {"name": "spawner-ui", "version": "0.0.1", "kind": "app", "plane": "execution"}},
+        )
+        gateway = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"modules": ["spark-intelligence-builder", "spawner-ui"]},
+            },
+        )
+        ordered = resolve_start_modules(
+            "spark-telegram-bot",
+            {
+                gateway.name: gateway,
+                builder.name: builder,
+                spawner.name: spawner,
+            },
+        )
+        self.assertEqual(
+            [module.name for module in ordered],
+            ["spark-intelligence-builder", "spawner-ui", "spark-telegram-bot"],
+        )
+
+    def test_resolve_start_modules_fails_when_dependency_not_installed(self) -> None:
+        gateway = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"modules": ["spark-intelligence-builder"]},
+            },
+        )
+        with self.assertRaises(SystemExit) as error:
+            resolve_start_modules("spark-telegram-bot", {gateway.name: gateway})
+        self.assertIn("required modules are not installed", str(error.exception))
+
+    def test_resolve_stop_module_names_stops_dependents_before_dependency(self) -> None:
+        builder = Module(
+            name="spark-intelligence-builder",
+            path=Path("C:/tmp/spark-intelligence-builder"),
+            manifest={"module": {"name": "spark-intelligence-builder", "version": "0.1.0", "kind": "runtime", "plane": "runtime"}},
+        )
+        spawner = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={"module": {"name": "spawner-ui", "version": "0.0.1", "kind": "app", "plane": "execution"}},
+        )
+        gateway = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"modules": ["spark-intelligence-builder", "spawner-ui"]},
+            },
+        )
+        order = resolve_stop_module_names(
+            "spark-intelligence-builder",
+            {
+                gateway.name: gateway,
+                builder.name: builder,
+                spawner.name: spawner,
+            },
+            {
+                gateway.name: {"pid": 100},
+                builder.name: {"pid": 200},
+            },
+        )
+        self.assertEqual(order, ["spark-telegram-bot", "spark-intelligence-builder"])
 
     def test_collect_secret_requirements_maps_manifest_secret_blocks(self) -> None:
         module = Module(

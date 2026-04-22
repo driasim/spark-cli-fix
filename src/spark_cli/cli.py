@@ -909,6 +909,82 @@ def resolve_installed_target_modules(target: str | None) -> list[Module]:
     return resolved
 
 
+def reverse_dependency_map(modules: dict[str, Module]) -> dict[str, set[str]]:
+    reverse: dict[str, set[str]] = {}
+    for module in modules.values():
+        for dependency in module.needs_modules:
+            reverse.setdefault(dependency, set()).add(module.name)
+    return reverse
+
+
+def topologically_sort_modules(modules: dict[str, Module]) -> list[Module]:
+    ordered: list[Module] = []
+    permanent: set[str] = set()
+    temporary: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in permanent:
+            return
+        if name in temporary:
+            raise SystemExit(f"Dependency cycle detected while ordering modules: {name}")
+        module = modules.get(name)
+        if module is None:
+            raise SystemExit(f"Cannot order missing module: {name}")
+        temporary.add(name)
+        for dependency in module.needs_modules:
+            if dependency in modules:
+                visit(dependency)
+        temporary.remove(name)
+        permanent.add(name)
+        ordered.append(module)
+
+    for name in sorted(modules):
+        visit(name)
+    return ordered
+
+
+def resolve_start_modules(target: str | None, installed_modules: dict[str, Module]) -> list[Module]:
+    requested_names = expand_targets(target, installed_modules, include_all=True)
+    needed_names: set[str] = set()
+    stack = list(requested_names)
+    while stack:
+        name = stack.pop()
+        module = installed_modules.get(name)
+        if module is None:
+            raise SystemExit(f"Unknown installed module: {name}")
+        if name in needed_names:
+            continue
+        needed_names.add(name)
+        missing_dependencies = [dependency for dependency in module.needs_modules if dependency not in installed_modules]
+        if missing_dependencies:
+            raise SystemExit(
+                f"Cannot start {module.name} because required modules are not installed: {', '.join(missing_dependencies)}"
+            )
+        stack.extend(module.needs_modules)
+    selected_modules = {name: installed_modules[name] for name in needed_names}
+    return topologically_sort_modules(selected_modules)
+
+
+def resolve_stop_module_names(target: str | None, installed_modules: dict[str, Module], tracked_pids: dict[str, Any]) -> list[str]:
+    if not tracked_pids:
+        return []
+    requested_names = expand_targets(target, installed_modules, include_all=True)
+    reverse_map = reverse_dependency_map(installed_modules)
+    stop_names: set[str] = set()
+    stack = list(requested_names)
+    while stack:
+        name = stack.pop()
+        if name in stop_names:
+            continue
+        stop_names.add(name)
+        stack.extend(sorted(reverse_map.get(name, set())))
+
+    installed_subset = {name: installed_modules[name] for name in stop_names if name in installed_modules}
+    ordered_names = [module.name for module in reversed(topologically_sort_modules(installed_subset))]
+    extra_names = [name for name in stop_names if name not in installed_subset]
+    return ordered_names + sorted(extra_names)
+
+
 def load_pids() -> dict[str, Any]:
     return load_json(PID_PATH, {})
 
@@ -957,11 +1033,8 @@ def cmd_start(args: argparse.Namespace) -> int:
     if not modules:
         print("No installed Spark modules recorded. Run `spark setup telegram-starter` first.")
         return 1
-    target_names = expand_targets(args.target, modules, include_all=True)
-    for name in target_names:
-        module = modules.get(name)
-        if module is None:
-            raise SystemExit(f"Unknown installed module: {name}")
+    target_modules = resolve_start_modules(args.target, modules)
+    for module in target_modules:
         if not module.run_command:
             print(f"Skipping {module.name}: no run.default command declared")
             continue
@@ -983,7 +1056,8 @@ def cmd_stop(args: argparse.Namespace) -> int:
         print("No tracked Spark processes.")
         return 0
 
-    target_names = expand_targets(args.target, {name: None for name in pids}, include_all=True)
+    installed_modules = resolve_installed_modules()
+    target_names = resolve_stop_module_names(args.target, installed_modules, pids)
     for name in target_names:
         record = pids.get(name)
         if not record:

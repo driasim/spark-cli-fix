@@ -73,6 +73,8 @@ The current supported ownership rule remains:
 - `setup <bundle>` installs the bundle, can execute manifest install commands, and writes generated module config
 - `update <module|bundle>` refreshes installed metadata, can rerun manifest install commands, and reapplies generated env to module `.env` files
 - `uninstall <module|bundle>` removes installed state, deletes generated module env files, removes managed `.env` blocks, and repairs bundle setup state
+- `start <module|bundle>` resolves `needs.modules` first, so the CLI starts Builder and Spawner before the Telegram gateway
+- `stop <module|bundle>` walks the reverse dependency graph, so dependents are stopped before the runtime they rely on
 
 ### Status Output
 
