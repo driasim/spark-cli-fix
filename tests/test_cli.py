@@ -33,7 +33,17 @@ from spark_cli.cli import (
     module_log_path,
     module_secret_env_bindings,
     check_runtime_version_for_module,
+    clear_install_progress,
+    describe_install_risk,
     enforce_runtime_versions,
+    ensure_trust_for_install,
+    INSTALL_PROGRESS_PATH,
+    is_blessed_registry_entry,
+    load_install_progress,
+    record_install_failure,
+    record_install_step,
+    run_install_commands_with_progress,
+    step_previously_completed,
     manifest_schema_version,
     needs_capabilities,
     parse_version_constraint,
@@ -93,6 +103,139 @@ def make_module(name: str, capabilities: list[str]) -> Module:
 
 
 class SparkCliTests(unittest.TestCase):
+    def test_describe_install_risk_lists_commands_and_hooks(self) -> None:
+        module = Module(
+            name="thirdparty",
+            path=Path("C:/tmp/thirdparty"),
+            manifest={
+                "module": {"name": "thirdparty", "version": "0.1.0", "kind": "service", "plane": "execution"},
+                "install": {"dev": {"commands": ["npm ci", "npm run build"]}},
+                "hooks": {"post_install": "node scripts/init.js", "pre_uninstall": "node scripts/shutdown.js"},
+            },
+        )
+        lines = describe_install_risk(module)
+        combined = "\n".join(lines)
+        self.assertIn("$ npm ci", combined)
+        self.assertIn("$ npm run build", combined)
+        self.assertIn("post_install", combined)
+        self.assertIn("pre_uninstall", combined)
+
+    def test_is_blessed_registry_entry_reads_registry(self) -> None:
+        # telegram-starter bundle members are all blessed in this repo's registry.json.
+        self.assertTrue(is_blessed_registry_entry("spark-telegram-bot"))
+        self.assertFalse(is_blessed_registry_entry("definitely-not-registered"))
+
+    def test_ensure_trust_for_install_passes_for_blessed_target(self) -> None:
+        module = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "install": {"dev": {"commands": ["npm ci"]}},
+            },
+        )
+
+        class Args:
+            trust = False
+            non_interactive = False
+            skip_install_commands = False
+
+        ensure_trust_for_install(Args(), module, "spark-telegram-bot")
+
+    def test_ensure_trust_for_install_rejects_non_blessed_non_interactive(self) -> None:
+        module = Module(
+            name="thirdparty",
+            path=Path("C:/tmp/thirdparty"),
+            manifest={
+                "module": {"name": "thirdparty", "version": "0.1.0", "kind": "service", "plane": "execution"},
+                "install": {"dev": {"commands": ["node evil.js"]}},
+            },
+        )
+
+        class Args:
+            trust = False
+            non_interactive = True
+            skip_install_commands = False
+
+        with patch("spark_cli.cli.stdin_is_tty", return_value=False):
+            with self.assertRaises(SystemExit) as error:
+                ensure_trust_for_install(Args(), module, "thirdparty")
+        self.assertIn("non-blessed", str(error.exception))
+
+    def test_ensure_trust_for_install_accepts_trust_flag_non_interactive(self) -> None:
+        module = Module(
+            name="thirdparty",
+            path=Path("C:/tmp/thirdparty"),
+            manifest={
+                "module": {"name": "thirdparty", "version": "0.1.0", "kind": "service", "plane": "execution"},
+                "install": {"dev": {"commands": ["node evil.js"]}},
+            },
+        )
+
+        class Args:
+            trust = True
+            non_interactive = True
+            skip_install_commands = False
+
+        ensure_trust_for_install(Args(), module, "thirdparty")
+
+    def test_install_progress_roundtrip_and_clear(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            progress_path = Path(tmp_dir) / "install_progress.json"
+            with patch("spark_cli.cli.INSTALL_PROGRESS_PATH", progress_path):
+                record_install_step("mod-a", "install_commands")
+                self.assertTrue(step_previously_completed("mod-a", "install_commands", resume=True))
+                self.assertFalse(step_previously_completed("mod-a", "install_commands", resume=False))
+                record_install_failure("mod-a", "install_commands", "npm ci: exit 1")
+                progress = load_install_progress("mod-a")
+                self.assertEqual(progress["failed_step"], "install_commands")
+                self.assertIn("npm ci", progress["last_error"])
+                clear_install_progress("mod-a")
+                self.assertEqual(load_install_progress("mod-a"), {})
+                self.assertFalse(progress_path.exists())
+
+    def test_run_install_commands_with_progress_skips_when_resume_and_completed(self) -> None:
+        module = Module(
+            name="skip-me",
+            path=Path("C:/tmp/skip-me"),
+            manifest={
+                "module": {"name": "skip-me", "version": "0.1.0", "kind": "service", "plane": "execution"},
+                "install": {"dev": {"commands": ["exit 1"]}},
+            },
+        )
+
+        class Args:
+            skip_install_commands = False
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("spark_cli.cli.INSTALL_PROGRESS_PATH", Path(tmp_dir) / "progress.json"):
+                record_install_step("skip-me", "install_commands")
+                # Would raise if it actually ran `exit 1`; --resume path must skip.
+                run_install_commands_with_progress(module, "skip-me", Args(), resume=True)
+
+    def test_run_install_commands_with_progress_records_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module_path = Path(tmp_dir) / "fail-me"
+            module_path.mkdir()
+            module = Module(
+                name="fail-me",
+                path=module_path,
+                manifest={
+                    "module": {"name": "fail-me", "version": "0.1.0", "kind": "service", "plane": "execution"},
+                    "install": {"dev": {"commands": ["exit 1"]}},
+                },
+            )
+
+            class Args:
+                skip_install_commands = False
+
+            with patch("spark_cli.cli.INSTALL_PROGRESS_PATH", Path(tmp_dir) / "progress.json"):
+                with self.assertRaises(SystemExit):
+                    run_install_commands_with_progress(module, "fail-me", Args(), resume=False)
+                progress = load_install_progress("fail-me")
+                self.assertEqual(progress["failed_step"], "install_commands")
+                self.assertNotIn("install_commands", progress.get("steps_completed", []))
+
     def test_parse_version_tuple_extracts_digits(self) -> None:
         self.assertEqual(parse_version_tuple("Python 3.13.5"), (3, 13, 5))
         self.assertEqual(parse_version_tuple("v22.18.0"), (22, 18, 0))

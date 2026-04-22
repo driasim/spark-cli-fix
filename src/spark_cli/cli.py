@@ -28,6 +28,7 @@ LOG_DIR = SPARK_HOME / "logs"
 REGISTRY_PATH = STATE_DIR / "installed.json"
 CONFIG_PATH = STATE_DIR / "setup.json"
 PID_PATH = STATE_DIR / "pids.json"
+INSTALL_PROGRESS_PATH = STATE_DIR / "install_progress.json"
 SECRETS_INDEX_PATH = CONFIG_DIR / "secrets_index.json"
 SECRETS_FILE_PATH = CONFIG_DIR / "secrets.local.json"
 KEYCHAIN_SERVICE = "spark-cli"
@@ -990,6 +991,115 @@ def remove_module_record(module_name: str) -> None:
     save_json(REGISTRY_PATH, installed)
 
 
+def is_blessed_registry_entry(target: str) -> bool:
+    metadata = load_registry_definition().get("modules", {}).get(target)
+    if not metadata:
+        return False
+    return bool(metadata.get("blessed"))
+
+
+def describe_install_risk(module: Module) -> list[str]:
+    lines: list[str] = []
+    commands = module.install_commands
+    if commands:
+        lines.append("Install commands that will run from the module repo:")
+        for command in commands:
+            lines.append(f"  $ {command}")
+    hooks = module.manifest.get("hooks", {})
+    for hook_name in ("post_install", "pre_uninstall", "post_uninstall"):
+        command = hooks.get(hook_name)
+        if command:
+            lines.append(f"Hook {hook_name}: {command}")
+    return lines
+
+
+def prompt_trust_non_blessed_install(module: Module, target: str, risk: list[str]) -> bool:
+    print("")
+    print(f"WARNING: {target} is not in the blessed registry.")
+    print("Installing it will execute code from the module repository on this machine:")
+    print("")
+    for line in risk:
+        print(f"  {line}")
+    print("")
+    try:
+        answer = input("Type 'yes' to proceed: ").strip().lower()
+    except EOFError:
+        return False
+    return answer in ("yes", "y")
+
+
+def ensure_trust_for_install(args: argparse.Namespace, module: Module, target: str) -> None:
+    if getattr(args, "trust", False):
+        return
+    if is_blessed_registry_entry(target):
+        return
+    risk = describe_install_risk(module)
+    if not risk:
+        return
+    if getattr(args, "skip_install_commands", False):
+        # Install commands are being skipped; uninstall hooks run later on tear-down
+        # but we still surface them the first time a non-blessed module is added.
+        pass
+    if not stdin_is_tty() or getattr(args, "non_interactive", False):
+        raise SystemExit(
+            f"Refusing to install non-blessed module `{target}` non-interactively. "
+            f"Pass --trust to approve running its install commands and hooks."
+        )
+    if not prompt_trust_non_blessed_install(module, target, risk):
+        raise SystemExit(f"Install aborted: {target} was not trusted.")
+
+
+def load_install_progress(target: str) -> dict[str, Any]:
+    data = load_json(INSTALL_PROGRESS_PATH, {})
+    entry = data.get(target) if isinstance(data, dict) else None
+    return dict(entry) if isinstance(entry, dict) else {}
+
+
+def save_install_progress(target: str, progress: dict[str, Any]) -> None:
+    data = load_json(INSTALL_PROGRESS_PATH, {})
+    if not isinstance(data, dict):
+        data = {}
+    data[target] = progress
+    save_json(INSTALL_PROGRESS_PATH, data)
+
+
+def clear_install_progress(target: str) -> None:
+    data = load_json(INSTALL_PROGRESS_PATH, {})
+    if not isinstance(data, dict):
+        return
+    if target not in data:
+        return
+    data.pop(target)
+    if data:
+        save_json(INSTALL_PROGRESS_PATH, data)
+    elif INSTALL_PROGRESS_PATH.exists():
+        INSTALL_PROGRESS_PATH.unlink()
+
+
+def record_install_step(target: str, step: str) -> None:
+    progress = load_install_progress(target)
+    completed = progress.setdefault("steps_completed", [])
+    if step not in completed:
+        completed.append(step)
+    progress["last_step"] = step
+    progress["last_ok_at"] = timestamp_now()
+    save_install_progress(target, progress)
+
+
+def record_install_failure(target: str, step: str, error: str) -> None:
+    progress = load_install_progress(target)
+    progress["failed_step"] = step
+    progress["last_error"] = error
+    progress["failed_at"] = timestamp_now()
+    save_install_progress(target, progress)
+
+
+def step_previously_completed(target: str, step: str, resume: bool) -> bool:
+    if not resume:
+        return False
+    return step in load_install_progress(target).get("steps_completed", [])
+
+
 def print_install_summary(modules: list[Module]) -> None:
     print("Install plan:")
     for module in modules:
@@ -1216,6 +1326,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     modules = discover_modules()
     installed_modules = resolve_installed_modules()
     registry = load_registry_definition()
+    resume = getattr(args, "resume", False)
     if args.target in registry.get("bundles", {}):
         bundle_modules = [modules[name] for name in resolve_bundle_names(args.target)]
         detect_ingress_owner(bundle_modules)
@@ -1229,9 +1340,9 @@ def cmd_install(args: argparse.Namespace) -> int:
             raise SystemExit("Cannot install bundle because of unmet capability needs:\n  - " + "\n  - ".join(unmet))
         if not getattr(args, "skip_runtime_check", False):
             enforce_runtime_versions(bundle_modules)
-        if not args.skip_install_commands:
-            for module in bundle_modules:
-                execute_install_commands(module)
+        for module in bundle_modules:
+            ensure_trust_for_install(args, module, module.name)
+            run_install_commands_with_progress(module, module.name, args, resume)
         install_modules(bundle_modules)
         for module in bundle_modules:
             install_module_record(
@@ -1242,6 +1353,7 @@ def cmd_install(args: argparse.Namespace) -> int:
                 bundle_name=args.target,
                 skip_install_commands=args.skip_install_commands,
             )
+            clear_install_progress(module.name)
         return 0
     module = resolve_install_target(args.target, modules)
     validate_manifest_schema(module)
@@ -1254,8 +1366,8 @@ def cmd_install(args: argparse.Namespace) -> int:
         raise SystemExit("Cannot install module because of unmet capability needs:\n  - " + "\n  - ".join(unmet))
     if not getattr(args, "skip_runtime_check", False):
         enforce_runtime_versions([module])
-    if not args.skip_install_commands:
-        execute_install_commands(module)
+    ensure_trust_for_install(args, module, args.target)
+    run_install_commands_with_progress(module, args.target, args, resume)
     install_modules([module])
     install_module_record(
         module,
@@ -1264,7 +1376,28 @@ def cmd_install(args: argparse.Namespace) -> int:
         source_target=args.target,
         skip_install_commands=args.skip_install_commands,
     )
+    clear_install_progress(args.target)
     return 0
+
+
+def run_install_commands_with_progress(
+    module: Module,
+    progress_key: str,
+    args: argparse.Namespace,
+    resume: bool,
+) -> None:
+    """Run [install.dev].commands with progress tracking so --resume can skip them."""
+    if args.skip_install_commands:
+        return
+    if step_previously_completed(progress_key, "install_commands", resume):
+        print(f"--resume: skipping install commands for {module.name} (already completed).")
+        return
+    try:
+        execute_install_commands(module)
+    except SystemExit as error:
+        record_install_failure(progress_key, "install_commands", str(error))
+        raise
+    record_install_step(progress_key, "install_commands")
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -1296,9 +1429,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
         "secret_keys": sorted(secret_values.keys()),
     }
     save_json(CONFIG_PATH, setup_state)
-    if not args.skip_install_commands:
-        for module in bundle:
-            execute_install_commands(module)
+    resume = getattr(args, "resume", False)
+    for module in bundle:
+        ensure_trust_for_install(args, module, module.name)
+        run_install_commands_with_progress(module, module.name, args, resume)
     install_modules(bundle)
     for module in bundle:
         install_module_record(
@@ -1309,6 +1443,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             bundle_name=args.bundle,
             skip_install_commands=args.skip_install_commands,
         )
+        clear_install_progress(module.name)
 
     keychain_report = persist_keychain_secrets(bundle, secret_values)
     generated_envs = build_module_envs(args, modules, secret_values)
@@ -1868,12 +2003,16 @@ def build_parser() -> argparse.ArgumentParser:
     install_parser.add_argument("target")
     install_parser.add_argument("--skip-install-commands", action="store_true")
     install_parser.add_argument("--skip-runtime-check", action="store_true", help="Skip [runtime].version constraint enforcement")
+    install_parser.add_argument("--trust", action="store_true", help="Approve running install commands and hooks for non-blessed modules without prompting")
+    install_parser.add_argument("--resume", action="store_true", help="Skip install steps that succeeded on a prior attempt")
     install_parser.set_defaults(func=cmd_install)
 
     setup_parser = subparsers.add_parser("setup", help="Configure a starter bundle")
     setup_parser.add_argument("bundle", choices=sorted(load_registry_definition().get("bundles", {}).keys()))
     setup_parser.add_argument("--skip-install-commands", action="store_true")
     setup_parser.add_argument("--skip-runtime-check", action="store_true", help="Skip [runtime].version constraint enforcement")
+    setup_parser.add_argument("--trust", action="store_true", help="Approve running install commands and hooks for non-blessed bundle modules without prompting")
+    setup_parser.add_argument("--resume", action="store_true", help="Skip install steps that succeeded on a prior attempt")
     setup_parser.add_argument(
         "--non-interactive",
         action="store_true",
