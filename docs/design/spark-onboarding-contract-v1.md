@@ -44,7 +44,11 @@ Setup owns the first wiring pass:
 - `spark-telegram-bot` receives `SPARK_BUILDER_REPO` so it can find Builder.
 - `spark-telegram-bot` receives `SPAWNER_UI_URL`.
 - `spawner-ui` receives `MISSION_CONTROL_WEBHOOK_URLS`.
-- Telegram, Spawner, and Builder receive the selected LLM gateway settings.
+- Telegram, Spawner, and Builder receive selected non-secret LLM gateway
+  metadata: provider, base URL, model, and default provider mapping.
+- Cloud LLM API keys are stored through Spark's secret backend and injected
+  only into modules that declare the matching `[needs].secrets` and
+  `[secrets.*].env_var` entries.
 
 LLM provider setup is intentionally explicit:
 
@@ -55,6 +59,9 @@ LLM provider setup is intentionally explicit:
 
 If no cloud provider is selected, setup defaults to Ollama. `spark status` must
 surface the configured provider and repair hints for missing cloud keys.
+
+Generated env files are not a secret store. They must be `.gitignore`d by every
+module and must not contain raw cloud API keys after setup.
 
 ## Definition of Ready
 

@@ -807,6 +807,14 @@ def build_llm_env(args: argparse.Namespace, secret_values: dict[str, str]) -> tu
     return provider, env
 
 
+def non_secret_llm_env(llm_env: dict[str, str]) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in llm_env.items()
+        if not key.endswith("_API_KEY") and key not in {"ZAI_API_KEY", "ANTHROPIC_API_KEY"}
+    }
+
+
 def llm_setup_state(provider: str, env: dict[str, str]) -> dict[str, Any]:
     spec = LLM_PROVIDER_ENV[provider]
     api_key_env = spec.get("api_key_env")
@@ -847,14 +855,15 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
     spawner_env = {
         "MISSION_CONTROL_WEBHOOK_URLS": f"{relay_base}/spawner-events",
     }
-    spawner_env.update({f"SPARK_{key}": value for key, value in llm_env.items()})
+    llm_metadata_env = non_secret_llm_env(llm_env)
+    spawner_env.update({f"SPARK_{key}": value for key, value in llm_metadata_env.items()})
     if secret_values.get("telegram.webhook_secret"):
         spawner_env["TELEGRAM_RELAY_SECRET"] = secret_values["telegram.webhook_secret"]
 
     return {
         gateway.name: gateway_env,
         spawner.name: spawner_env,
-        builder.name: {f"SPARK_{key}": value for key, value in llm_env.items()},
+        builder.name: {f"SPARK_{key}": value for key, value in llm_metadata_env.items()},
     }
 
 

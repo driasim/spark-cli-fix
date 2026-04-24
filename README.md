@@ -191,10 +191,13 @@ capability conflicts, and records the install under `~/.spark/state/`.
 
 Setup also writes the shared gateway env that makes the pieces talk to each
 other: Telegram gets the bot/admin settings, Telegram and Spawner both get the
-mission relay URL, and Telegram/Spawner/Builder get the selected LLM provider
-settings. If no cloud provider is chosen, Spark defaults the gateway to local
-Ollama (`http://localhost:11434`) so a user can still bring their own local
-runtime. Cloud providers can be selected with:
+mission relay URL, and Telegram/Spawner/Builder get the selected non-secret LLM
+provider metadata. Cloud API keys are stored through Spark's secret backend
+when the receiving module declares them in `spark.toml`; generated module env
+files should contain provider/model/base-url metadata, not raw API keys. If no
+cloud provider is chosen, Spark defaults the gateway to local Ollama
+(`http://localhost:11434`) so a user can still bring their own local runtime.
+Cloud providers can be selected with:
 
 - `--llm-provider zai --zai-api-key ...` for GLM through the Z.AI coding endpoint
 - `--llm-provider openai --openai-api-key ...`

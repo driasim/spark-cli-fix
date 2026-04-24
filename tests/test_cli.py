@@ -624,7 +624,7 @@ class SparkCliTests(unittest.TestCase):
                     "plane": "ingress",
                     "capabilities": ["telegram.ingress"],
                     "needs_capabilities": ["spark.runtime"],
-                    "needs_secrets": ["telegram.bot_token", "telegram.admin_ids"],
+                    "needs_secrets": ["telegram.bot_token", "telegram.admin_ids", "llm.zai.api_key"],
                 },
             }
             registry = {"modules": {}, "bundles": {"telegram-starter": {"modules": list(manifests)}}}
@@ -647,6 +647,12 @@ class SparkCliTests(unittest.TestCase):
                             "[needs]",
                             "capabilities = [" + ", ".join(f'"{item}"' for item in manifest["needs_capabilities"]) + "]",
                             "secrets = [" + ", ".join(f'"{item}"' for item in manifest["needs_secrets"]) + "]",
+                            "",
+                            "[secrets.llm_zai_api_key]",
+                            'prompt = "Z.AI API key"',
+                            "required = false",
+                            'storage = "keychain"',
+                            'env_var = "ZAI_API_KEY"',
                         ]
                     ),
                     encoding="utf-8",
@@ -720,11 +726,12 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn("ADMIN_TELEGRAM_IDS=111,222", gateway_env)
             self.assertIn("SPAWNER_UI_URL=http://127.0.0.1:5173", gateway_env)
             self.assertIn("LLM_PROVIDER=zai", gateway_env)
-            self.assertIn("ZAI_API_KEY=zai-test-key", gateway_env)
+            self.assertNotIn("ZAI_API_KEY=zai-test-key", gateway_env)
             self.assertIn("ZAI_BASE_URL=https://api.z.ai/api/coding/paas/v4/", gateway_env)
             self.assertIn("ZAI_MODEL=glm-5.1", gateway_env)
             self.assertNotIn("BOT_TOKEN=", spawner_env)
             self.assertIn("SPARK_LLM_PROVIDER=zai", spawner_env)
+            self.assertNotIn("SPARK_ZAI_API_KEY", spawner_env)
             self.assertIn("MISSION_CONTROL_WEBHOOK_URLS=http://127.0.0.1:8788/spawner-events", spawner_env)
 
     def test_print_install_summary_mentions_ingress_owner(self) -> None:
@@ -975,6 +982,8 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(gateway_env["ZAI_API_KEY"], "zai-key")
         self.assertEqual(gateway_env["ZAI_MODEL"], "glm-5.1")
         self.assertEqual(envs["spawner-ui"]["SPARK_ZAI_MODEL"], "glm-5.1")
+        self.assertNotIn("SPARK_ZAI_API_KEY", envs["spawner-ui"])
+        self.assertNotIn("SPARK_ZAI_API_KEY", envs["spark-intelligence-builder"])
 
     def test_pid_is_running_detects_current_process(self) -> None:
         self.assertTrue(pid_is_running(os.getpid()))
