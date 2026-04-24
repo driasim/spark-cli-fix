@@ -1480,6 +1480,35 @@ class SparkCliTests(unittest.TestCase):
             elif CONFIG_PATH.exists():
                 CONFIG_PATH.unlink()
 
+    def test_install_script_bootstraps_local_prefix_contract(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "scripts" / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('SPARK_PREFIX="${SPARK_PREFIX:-$HOME/.spark}"', script)
+        self.assertIn('SPARK_NODE_VERSION="${SPARK_NODE_VERSION:-22.18.0}"', script)
+        self.assertIn("node-v$SPARK_NODE_VERSION-linux-x64.tar.xz", script)
+        self.assertIn("python3 -m venv", script)
+        self.assertIn("pip install -e", script)
+        self.assertIn("SPARK_LOCAL_REGISTRY", script)
+        self.assertIn('export SPARK_HOME="$SPARK_PREFIX"', script)
+        self.assertIn('"$SPARK_PREFIX/bin/spark" setup "$SPARK_BUNDLE"', script)
+        self.assertIn("spark_cli.cli", script)
+
+    def test_cli_honors_spark_home_environment_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env = dict(os.environ)
+            env["SPARK_HOME"] = tmp_dir
+            result = subprocess.run(
+                [
+                    os.environ.get("PYTHON", "python"),
+                    "-c",
+                    "import spark_cli.cli as c; print(c.SPARK_HOME)",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(Path(result.stdout.strip()), Path(tmp_dir))
+
 
 if __name__ == "__main__":
     unittest.main()

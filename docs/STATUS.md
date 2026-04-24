@@ -1,14 +1,47 @@
 # Spark CLI — Status Audit
 
-**Last updated:** 2026-04-23 (launch prep)
+**Last updated:** 2026-04-24 (installer bootstrap pass)
 **Scope:** the `spark-cli` spike at `C:\Users\USER\Desktop\spark-cli`
 **Source of truth:** `src/spark_cli/cli.py` (~2420 LOC) + `tests/test_cli.py` (~1270 LOC)
-**Test state:** 84/84 passing on this machine
-**Branch:** `master` at commit `b05cb43`
+**Test state:** 93/93 passing on this machine after the bootstrap installer addition
+**Branch:** `master`
 
 ---
 
-## Launch readiness (2026-04-23)
+## Installer bootstrap update (2026-04-24)
+
+Spark now has the first real one-shot installer layer:
+
+- `scripts/install.sh`
+- installs into a local prefix (`~/.spark` by default)
+- downloads managed Node 22 into `~/.spark/tools/`
+- creates an isolated Python virtualenv for `spark-cli`
+- writes `~/.spark/bin/spark`
+- runs `spark setup telegram-starter` by default
+- supports local registry overrides for WSL/offline smoke tests
+
+This brings Spark closer to the OpenClaw/Hermes installer pattern: a local
+prefix, managed runtime tools, an explicit setup step, and a doctor/status
+repair loop.
+
+Verified in WSL sandbox:
+
+- `spark setup` with a local registry override installed/registers the five
+  starter modules in a disposable `$HOME`
+- generated per-module config files for all five modules
+- selected `spark-telegram-bot` as the only Telegram ingress owner
+
+Still needs a follow-up hardening pass:
+
+- `scripts/install.ps1` for native Windows
+- full dependency-install smoke with install command logs per module
+- bundle lock file with repo refs/SHAs
+- installer checksum verification for downloaded Node tarballs
+- first-class `spark doctor --fix-runtime` or equivalent repair mode
+
+---
+
+## Launch readiness snapshot (2026-04-23)
 
 Fresh-machine install path is verified end to end.
 

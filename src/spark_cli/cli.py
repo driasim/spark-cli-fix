@@ -21,7 +21,7 @@ import tomllib
 CLI_MAX_SUPPORTED_SCHEMA = 1
 
 
-SPARK_HOME = Path.home() / ".spark"
+SPARK_HOME = Path(os.environ.get("SPARK_HOME", Path.home() / ".spark")).expanduser()
 STATE_DIR = SPARK_HOME / "state"
 CONFIG_DIR = SPARK_HOME / "config"
 MODULE_CONFIG_DIR = CONFIG_DIR / "modules"

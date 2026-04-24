@@ -53,6 +53,32 @@ override.
 
 ## Install the CLI
 
+Recommended macOS/Linux/WSL install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vibeforge1111/spark-cli/master/scripts/install.sh | bash
+```
+
+The installer keeps Spark self-contained under `~/.spark/`:
+
+- downloads a managed Node 22 runtime into `~/.spark/tools/`
+- installs `spark-cli` into an isolated Python virtualenv
+- writes a `~/.spark/bin/spark` wrapper
+- runs `spark setup telegram-starter` unless `--skip-setup` is passed
+
+For scripted setup:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vibeforge1111/spark-cli/master/scripts/install.sh | bash -s -- \
+  --setup-arg --non-interactive \
+  --setup-arg --bot-token \
+  --setup-arg "$TELEGRAM_BOT_TOKEN" \
+  --setup-arg --admin-telegram-ids \
+  --setup-arg "$TELEGRAM_ADMIN_IDS"
+```
+
+Local development install:
+
 ```bash
 git clone https://github.com/vibeforge1111/spark-cli
 cd spark-cli
