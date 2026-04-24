@@ -4,6 +4,7 @@ import os
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from io import StringIO
@@ -1146,6 +1147,28 @@ class SparkCliTests(unittest.TestCase):
             self.assertEqual(env["PATH"].split(os.pathsep)[0], str(shim_dir))
             shim_name = "python.cmd" if os.name == "nt" else "python"
             self.assertTrue((shim_dir / shim_name).exists())
+
+    def test_shell_command_env_prefers_managed_python_over_system_python(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_dir = Path(tmp_dir) / "state"
+            fake_bin = Path(tmp_dir) / "fake-bin"
+            fake_bin.mkdir()
+            fake_python = fake_bin / ("python.exe" if os.name == "nt" else "python")
+            fake_python.write_text("", encoding="utf-8")
+            with patch("spark_cli.cli.STATE_DIR", state_dir):
+                with patch.dict(os.environ, {"PATH": str(fake_bin)}, clear=False):
+                    env = shell_command_env()
+            shim_dir = state_dir / "runtime-shims"
+            self.assertEqual(env["PATH"].split(os.pathsep)[0], str(shim_dir))
+            expected = "python.cmd" if os.name == "nt" else "python"
+            python_shim = shim_dir / expected
+            self.assertTrue(python_shim.exists())
+            if os.name != "nt":
+                self.assertEqual(python_shim.resolve(), Path(sys.executable).resolve())
+                self.assertTrue((shim_dir / "pip").exists())
+            else:
+                self.assertIn(sys.executable, python_shim.read_text(encoding="utf-8"))
+                self.assertTrue((shim_dir / "pip.cmd").exists())
 
     def test_detect_runtime_binary_reports_absent_for_missing_tool(self) -> None:
         info = detect_runtime_binary("definitely-not-a-real-tool-xyz")

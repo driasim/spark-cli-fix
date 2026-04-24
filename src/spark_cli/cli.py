@@ -526,27 +526,31 @@ def detect_runtime_binary(name: str) -> dict[str, Any]:
 
 def shell_command_env() -> dict[str, str]:
     env = os.environ.copy()
-    if shutil.which("python", path=env.get("PATH")):
-        return env
-    python_path = resolve_runtime_binary("python")
+    current_python = Path(sys.executable)
+    python_path = str(current_python) if current_python.exists() else resolve_runtime_binary("python")
     if not python_path:
         return env
 
     shim_dir = STATE_DIR / "runtime-shims"
     shim_dir.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
-        shim_path = shim_dir / "python.cmd"
-        shim_path.write_text(f'@"{python_path}" %*\n', encoding="utf-8")
+        for shim_name in ("python.cmd", "python3.cmd"):
+            (shim_dir / shim_name).write_text(f'@"{python_path}" %*\n', encoding="utf-8")
+        (shim_dir / "pip.cmd").write_text(f'@"{python_path}" -m pip %*\n', encoding="utf-8")
     else:
-        shim_path = shim_dir / "python"
-        if shim_path.exists() or shim_path.is_symlink():
-            try:
-                if shim_path.resolve() != Path(python_path).resolve():
+        for shim_name in ("python", "python3"):
+            shim_path = shim_dir / shim_name
+            if shim_path.exists() or shim_path.is_symlink():
+                try:
+                    if shim_path.resolve() != Path(python_path).resolve():
+                        shim_path.unlink()
+                except OSError:
                     shim_path.unlink()
-            except OSError:
-                shim_path.unlink()
-        if not shim_path.exists():
-            shim_path.symlink_to(python_path)
+            if not shim_path.exists():
+                shim_path.symlink_to(python_path)
+        pip_path = shim_dir / "pip"
+        pip_path.write_text(f'#!/usr/bin/env sh\nexec "{python_path}" -m pip "$@"\n', encoding="utf-8")
+        pip_path.chmod(0o755)
     env["PATH"] = str(shim_dir) + os.pathsep + env.get("PATH", "")
     return env
 
