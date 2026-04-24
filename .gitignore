@@ -5,3 +5,11 @@ dist/
 build/
 *.egg-info/
 .learnings/
+.env
+.env.*
+!.env.example
+state/
+logs/
+config/
+modules/
+secrets.local.json
