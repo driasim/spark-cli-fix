@@ -1165,7 +1165,7 @@ class SparkCliTests(unittest.TestCase):
             python_shim = shim_dir / expected
             self.assertTrue(python_shim.exists())
             if os.name != "nt":
-                self.assertEqual(python_shim.resolve(), Path(sys.executable).resolve())
+                self.assertIn(str(Path(sys.executable)), python_shim.read_text(encoding="utf-8"))
                 self.assertTrue((shim_dir / "pip").exists())
             else:
                 self.assertIn(sys.executable, python_shim.read_text(encoding="utf-8"))

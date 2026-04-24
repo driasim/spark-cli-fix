@@ -541,14 +541,8 @@ def shell_command_env() -> dict[str, str]:
     else:
         for shim_name in ("python", "python3"):
             shim_path = shim_dir / shim_name
-            if shim_path.exists() or shim_path.is_symlink():
-                try:
-                    if shim_path.resolve() != Path(python_path).resolve():
-                        shim_path.unlink()
-                except OSError:
-                    shim_path.unlink()
-            if not shim_path.exists():
-                shim_path.symlink_to(python_path)
+            shim_path.write_text(f'#!/usr/bin/env sh\nexec "{python_path}" "$@"\n', encoding="utf-8")
+            shim_path.chmod(0o755)
         pip_path = shim_dir / "pip"
         pip_path.write_text(f'#!/usr/bin/env sh\nexec "{python_path}" -m pip "$@"\n', encoding="utf-8")
         pip_path.chmod(0o755)
