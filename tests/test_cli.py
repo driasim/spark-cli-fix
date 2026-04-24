@@ -16,6 +16,7 @@ from spark_cli.cli import (
     build_parser,
     build_status_repair_hints,
     build_module_envs,
+    command_with_managed_python,
     collect_secret_requirements,
     collect_secret_values,
     cmd_setup,
@@ -1169,6 +1170,34 @@ class SparkCliTests(unittest.TestCase):
             else:
                 self.assertIn(sys.executable, python_shim.read_text(encoding="utf-8"))
                 self.assertTrue((shim_dir / "pip.cmd").exists())
+
+    def test_command_with_managed_python_rewrites_pip_installers(self) -> None:
+        rewritten = command_with_managed_python("python -m pip install -e .")
+        self.assertIn("-m pip install -e .", rewritten)
+        self.assertNotEqual(rewritten, "python -m pip install -e .")
+        self.assertIn(str(Path(sys.executable)), rewritten)
+
+    def test_execute_install_commands_uses_managed_python_for_python_commands(self) -> None:
+        module = Module(
+            name="managed-python",
+            path=Path.cwd(),
+            manifest={
+                "module": {"name": "managed-python", "version": "0.1.0", "kind": "runtime", "plane": "runtime"},
+                "install": {"dev": {"commands": ["python -m pip install -e ."]}},
+            },
+        )
+        captured: list[str] = []
+
+        def fake_run_shell(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+            captured.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch("spark_cli.cli.run_shell", fake_run_shell):
+            execute_install_commands(module)
+
+        self.assertEqual(len(captured), 1)
+        self.assertIn(str(Path(sys.executable)), captured[0])
+        self.assertIn("-m pip install -e .", captured[0])
 
     def test_detect_runtime_binary_reports_absent_for_missing_tool(self) -> None:
         info = detect_runtime_binary("definitely-not-a-real-tool-xyz")

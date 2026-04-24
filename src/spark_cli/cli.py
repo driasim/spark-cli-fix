@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets as py_secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -1318,7 +1319,7 @@ def install_modules(modules: list[Module]) -> None:
 def execute_install_commands(module: Module) -> None:
     for command in module.install_commands:
         print(f"Running install command for {module.name}: {command}")
-        result = run_shell(command, module.path)
+        result = run_shell(command_with_managed_python(command), module.path)
         if result.returncode != 0:
             raise SystemExit(
                 f"{module.name} install command failed: {summarize_command_output(result)}"
@@ -1736,6 +1737,31 @@ def run_shell(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
         text=True,
         env=shell_command_env(),
     )
+
+
+def quote_managed_python() -> str:
+    python_path = str(Path(sys.executable))
+    if os.name == "nt":
+        return subprocess.list2cmdline([python_path])
+    return shlex.quote(python_path)
+
+
+def command_with_managed_python(command: str) -> str:
+    stripped = command.lstrip()
+    leading = command[: len(command) - len(stripped)]
+    managed_python = quote_managed_python()
+    rewrites = (
+        ("python -m pip", f"{managed_python} -m pip"),
+        ("python3 -m pip", f"{managed_python} -m pip"),
+        ("pip ", f"{managed_python} -m pip "),
+        ("pip3 ", f"{managed_python} -m pip "),
+        ("python ", f"{managed_python} "),
+        ("python3 ", f"{managed_python} "),
+    )
+    for source, replacement in rewrites:
+        if stripped == source.rstrip() or stripped.startswith(source):
+            return leading + replacement + stripped[len(source):]
+    return command
 
 
 def summarize_command_output(result: subprocess.CompletedProcess[str]) -> str:
