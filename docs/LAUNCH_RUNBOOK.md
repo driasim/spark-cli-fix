@@ -23,13 +23,17 @@ dashboard/resonance API is not part of launch. A starter install should not need
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/vibeforge1111/spark-cli/master/scripts/install.ps1 | iex
+iwr https://raw.githubusercontent.com/vibeforge1111/spark-cli/master/scripts/install.ps1 -OutFile .\install.ps1
+Get-Content .\install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 Linux, WSL, or macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vibeforge1111/spark-cli/master/scripts/install.sh | bash
+curl -fsSLO https://raw.githubusercontent.com/vibeforge1111/spark-cli/master/scripts/install.sh
+less install.sh
+bash ./install.sh
 ```
 
 Both installers install the CLI, run the default starter setup, and write Spark
@@ -76,6 +80,8 @@ Expected setup state:
 - bundle is `telegram-starter`
 - all five starter modules are installed
 - `telegram.ingress` is owned by `spark-telegram-bot`
+- Telegram launch mode is long polling; no Telegram webhook env is generated
+- Telegram and Spawner share a generated relay secret
 - LLM provider is configured when a provider key was supplied
 - repair hints do not mention dashboard URLs or port `8787`
 

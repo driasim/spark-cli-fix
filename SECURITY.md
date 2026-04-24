@@ -17,7 +17,7 @@ generated config, terminal output, and model-visible context.
 - `.env`, `.env.*`, except placeholder-only `.env.example`
 - `secrets.local.json`
 - local state under `~/.spark/state`, `~/.spark/config`, `~/.spark/logs`
-- local runtime databases, token files, webhook state, and process logs
+- local runtime databases, token files, gateway state, and process logs
 
 ## Launch Verification
 
@@ -27,7 +27,8 @@ Before a launch or demo:
 2. Run a tracked-file secret scan for API-key and Telegram-token patterns.
 3. Run a sandbox `spark setup` with fake tokens and verify generated env files
    do not contain the fake cloud API key.
-4. Confirm the real Telegram bot has exactly one polling owner.
+4. Confirm the real Telegram bot has exactly one polling owner and no Telegram
+   webhook env is configured.
 5. Rotate any real token that was pasted into a chat, log, or terminal transcript.
 
 ## Threat Model
