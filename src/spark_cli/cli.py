@@ -1834,6 +1834,8 @@ def run_shell(command: str, cwd: Path, env: dict[str, str] | None = None) -> sub
         shell=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=env or shell_command_env(),
     )
 
@@ -1867,7 +1869,9 @@ def command_with_managed_python(command: str) -> str:
 
 def summarize_command_output(result: subprocess.CompletedProcess[str]) -> str:
     lines = []
-    for raw_line in (result.stdout + "\n" + result.stderr).splitlines():
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    for raw_line in (stdout + "\n" + stderr).splitlines():
         line = raw_line.strip()
         if not line:
             continue

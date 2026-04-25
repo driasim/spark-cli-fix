@@ -565,6 +565,15 @@ class SparkCliTests(unittest.TestCase):
             "Spawner UI unhealthy: cannot reach http://127.0.0.1:5173/api/providers",
         )
 
+    def test_summarize_command_output_handles_missing_streams(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["dummy"],
+            returncode=1,
+            stdout=None,
+            stderr="module emitted undecodable output",
+        )
+        self.assertEqual(summarize_command_output(result), "module emitted undecodable output")
+
     def test_update_env_file_replaces_managed_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             env_path = Path(tmp_dir) / ".env"
