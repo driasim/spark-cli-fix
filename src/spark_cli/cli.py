@@ -162,6 +162,14 @@ class Module:
         return str(command)
 
 
+@dataclass
+class SetupBundlePlan:
+    modules: dict[str, Module]
+    bundle: list[Module]
+    ingress_owner: Module
+    installed_modules: dict[str, Module]
+
+
 def load_registry_definition() -> dict[str, Any]:
     return load_json(LOCAL_REGISTRY_PATH, {"modules": {}, "bundles": {}})
 
@@ -2189,8 +2197,7 @@ def print_setup_next_steps(bundle_name: str, ingress_owner: Module, llm_state: d
     print("Run `spark guide` anytime for BotFather, LLM, module, and Telegram command help.")
 
 
-def cmd_setup(args: argparse.Namespace) -> int:
-    ensure_state_dirs()
+def resolve_setup_bundle_plan(args: argparse.Namespace) -> SetupBundlePlan:
     modules = discover_modules()
     modules = ensure_bundle_modules_available(resolve_bundle_names(args.bundle), modules)
     bundle = resolve_bundle(args.bundle, modules)
@@ -2206,15 +2213,26 @@ def cmd_setup(args: argparse.Namespace) -> int:
         raise SystemExit("Cannot run setup because of unmet capability needs:\n  - " + "\n  - ".join(unmet))
     if not getattr(args, "skip_runtime_check", False):
         enforce_runtime_versions(bundle)
-    interactive = setup_is_interactive(args)
-    if interactive:
-        print_setup_preflight(bundle)
+    return SetupBundlePlan(
+        modules=modules,
+        bundle=bundle,
+        ingress_owner=ingress_owner,
+        installed_modules=installed_modules,
+    )
+
+
+def collect_setup_configuration(
+    args: argparse.Namespace,
+    bundle: list[Module],
+    ingress_owner: Module,
+    interactive: bool,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Collect secrets and LLM choices, then build the persisted setup state."""
     secret_values = collect_secret_values(args, bundle, interactive=interactive)
     secret_values = ensure_generated_setup_secrets(secret_values, bundle)
     if interactive:
         secret_values = run_llm_provider_wizard(args, secret_values)
     llm_provider, llm_env = build_llm_env(args, secret_values)
-
     setup_state = {
         "bundle": args.bundle,
         "modules": [module.name for module in bundle],
@@ -2224,7 +2242,15 @@ def cmd_setup(args: argparse.Namespace) -> int:
         "llm": llm_setup_state(llm_provider, llm_env),
         "builder_home": str(spark_builder_home()),
     }
-    save_json(CONFIG_PATH, setup_state)
+    return secret_values, setup_state
+
+
+def install_setup_bundle(
+    args: argparse.Namespace,
+    bundle: list[Module],
+    installed_modules: dict[str, Module],
+) -> None:
+    """Install or register setup bundle modules while keeping reruns lightweight."""
     resume = getattr(args, "resume", False)
     setup_install_skips: dict[str, bool] = {}
     for module in bundle:
@@ -2251,6 +2277,14 @@ def cmd_setup(args: argparse.Namespace) -> int:
         )
         clear_install_progress(module.name)
 
+
+def write_setup_runtime_config(
+    args: argparse.Namespace,
+    modules: dict[str, Module],
+    bundle: list[Module],
+    secret_values: dict[str, str],
+) -> tuple[list[str], dict[str, str]]:
+    """Write Builder state, keychain secrets, and generated module env files."""
     builder_notes = initialize_builder_runtime_home(modules)
     keychain_report = persist_keychain_secrets(bundle, secret_values)
     generated_envs = build_module_envs(args, modules, secret_values)
@@ -2261,7 +2295,16 @@ def cmd_setup(args: argparse.Namespace) -> int:
         env_path = module_env_path(module)
         if env_path is not None and env_values:
             update_env_file(env_path, env_values)
+    return builder_notes, keychain_report
 
+
+def print_setup_summary(
+    args: argparse.Namespace,
+    ingress_owner: Module,
+    builder_notes: list[str],
+    keychain_report: dict[str, str],
+    setup_state: dict[str, Any],
+) -> None:
     print("Spark setup complete.")
     print(f"Bundle: {args.bundle}")
     print(f"Telegram ingress owner: {ingress_owner.name}")
@@ -2273,6 +2316,29 @@ def cmd_setup(args: argparse.Namespace) -> int:
         for secret_id, backend in sorted(keychain_report.items()):
             print(f"Secret {secret_id} -> {backend}")
     print_setup_next_steps(args.bundle, ingress_owner, setup_state["llm"])
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    ensure_state_dirs()
+    plan = resolve_setup_bundle_plan(args)
+    interactive = setup_is_interactive(args)
+    if interactive:
+        print_setup_preflight(plan.bundle)
+    secret_values, setup_state = collect_setup_configuration(
+        args,
+        plan.bundle,
+        plan.ingress_owner,
+        interactive,
+    )
+    save_json(CONFIG_PATH, setup_state)
+    install_setup_bundle(args, plan.bundle, plan.installed_modules)
+    builder_notes, keychain_report = write_setup_runtime_config(
+        args,
+        plan.modules,
+        plan.bundle,
+        secret_values,
+    )
+    print_setup_summary(args, plan.ingress_owner, builder_notes, keychain_report, setup_state)
     return 0
 
 

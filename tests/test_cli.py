@@ -23,6 +23,7 @@ from spark_cli.cli import (
     command_with_managed_python,
     collect_secret_requirements,
     collect_secret_values,
+    collect_setup_configuration,
     collect_telegram_fix_payload,
     collect_verify_payload,
     cmd_setup,
@@ -749,6 +750,94 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(args.builder_llm_provider, "openai")
         self.assertEqual(args.memory_llm_provider, "ollama")
         self.assertEqual(args.mission_llm_provider, "anthropic")
+
+    def test_collect_setup_configuration_builds_state_without_install_side_effects(self) -> None:
+        gateway = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {
+                    "secrets": [
+                        "telegram.bot_token",
+                        "telegram.admin_ids",
+                        "telegram.relay_secret",
+                        "llm.zai.api_key",
+                    ]
+                },
+                "secrets": {
+                    "telegram_bot_token": {
+                        "prompt": "Telegram bot token from @BotFather",
+                        "required": True,
+                        "storage": "keychain",
+                        "env_var": "BOT_TOKEN",
+                    },
+                    "telegram_admin_ids": {
+                        "prompt": "Comma-separated Telegram admin IDs",
+                        "required": True,
+                        "storage": "file",
+                        "env_var": "ADMIN_TELEGRAM_IDS",
+                    },
+                    "telegram_relay_secret": {
+                        "prompt": "Local relay secret",
+                        "required": False,
+                        "storage": "keychain",
+                        "env_var": "TELEGRAM_RELAY_SECRET",
+                    },
+                    "llm_zai_api_key": {
+                        "prompt": "Z.AI key",
+                        "required": False,
+                        "storage": "keychain",
+                        "env_var": "ZAI_API_KEY",
+                    },
+                },
+            },
+        )
+        args = build_parser().parse_args(
+            [
+                "setup",
+                "--non-interactive",
+                "--secret",
+                "telegram.bot_token=123456:test-token",
+                "--secret",
+                "telegram.admin_ids=111",
+                "--llm-provider",
+                "zai",
+                "--zai-api-key",
+                "zai-test-key",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir, \
+             patch("spark_cli.cli.fetch_secret", return_value=None), \
+             patch("spark_cli.cli.fetch_generated_secret_value", return_value=None), \
+             patch("spark_cli.cli.spark_builder_home", return_value=Path(tmp_dir) / "builder-home"):
+            secret_values, setup_state = collect_setup_configuration(args, [gateway], gateway, interactive=False)
+
+        self.assertEqual(secret_values["telegram.bot_token"], "123456:test-token")
+        self.assertEqual(secret_values["telegram.admin_ids"], "111")
+        self.assertEqual(secret_values["llm.zai.api_key"], "zai-test-key")
+        self.assertIn("telegram.relay_secret", secret_values)
+        self.assertEqual(setup_state["bundle"], "telegram-starter")
+        self.assertEqual(setup_state["telegram_ingress_owner"], "spark-telegram-bot")
+        self.assertEqual(setup_state["llm"]["provider"], "zai")
+        self.assertEqual(
+            {role: role_state["provider"] for role, role_state in setup_state["llm"]["roles"].items()},
+            {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "zai"},
+        )
+
+    def test_registry_sources_use_canonical_public_repos(self) -> None:
+        registry = json.loads((Path(__file__).resolve().parents[1] / "registry.json").read_text(encoding="utf-8"))
+        sources = {
+            name: str(entry.get("source", ""))
+            for name, entry in registry.get("modules", {}).items()
+            if isinstance(entry, dict)
+        }
+        self.assertEqual(set(sources), set(registry.get("bundles", {}).get("telegram-starter", {}).get("modules", [])))
+        for name, source in sources.items():
+            with self.subTest(module=name):
+                self.assertTrue(source.startswith("https://github.com/vibeforge1111/"))
+                self.assertNotIn("github.com/spark/", source)
 
     def test_autostart_install_defaults_to_telegram_starter_and_now_is_optional(self) -> None:
         args = build_parser().parse_args(["autostart", "install", "--now"])
