@@ -1593,7 +1593,7 @@ class SparkCliTests(unittest.TestCase):
 
         self.assertFalse(ready)
         self.assertIn("Telegram rejected BOT_TOKEN", detail)
-        self.assertIn("process exited with code 1", detail)
+        self.assertIn("Process exited with code 1", detail)
         run.assert_called_once_with("npm run health:polling", module.path, env={}, timeout=20)
 
     def test_wait_for_ready_check_accepts_running_process(self) -> None:

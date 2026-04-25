@@ -3028,7 +3028,8 @@ def wait_for_ready_check(module: Module, process: subprocess.Popen[Any] | None =
                     result = run_shell(ready_check, module.path, env=module_runtime_env(module), timeout=timeout_seconds)
                     if result.returncode == 0:
                         return True, summarize_command_output(result)
-                    return False, f"{summarize_command_output(result)}; process exited with code {exit_code}"
+                    ready_detail = summarize_command_output(result).rstrip(".")
+                    return False, f"{ready_detail}. Process exited with code {exit_code}"
                 return False, f"process exited with code {exit_code}"
         if ready_check.startswith(("http://", "https://")):
             try:
@@ -3053,7 +3054,7 @@ def format_start_warning(module: Module, detail: str, process: subprocess.Popen[
     log_hint = f"Run `spark logs {module.name} --lines 80` for startup logs."
     exit_code = process.poll()
     if exit_code is not None:
-        if "process exited with code" in detail:
+        if "process exited with code" in detail.lower():
             return f"{detail}. {log_hint}"
         return f"{detail}. The process exited with code {exit_code}. {log_hint}"
     return f"{detail}. The process is still running and may still be booting. {log_hint}"
