@@ -2077,7 +2077,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(collected["telegram.bot_token"], "already-set")
         self.assertEqual(collected["telegram.admin_ids"], "123,456")
         self.assertNotIn("telegram.relay_secret", collected)
-        self.assertEqual(len(prompted), 2)
+        self.assertEqual(len(prompted), 1)
 
     def test_run_setup_wizard_reprompts_when_required_secret_empty(self) -> None:
         requirements = {"telegram.bot_token": {"prompt": "Bot token", "required": True}}
@@ -2096,10 +2096,44 @@ class SparkCliTests(unittest.TestCase):
             mission_llm_provider = None
 
         args = Args()
-        with patch("builtins.input", return_value="zai"), \
+        with patch("builtins.input", side_effect=["zai", ""]), \
              patch("spark_cli.cli.getpass.getpass", return_value="zai-test-key"):
             values = run_llm_provider_wizard(args, {})
         self.assertEqual(args.llm_provider, "zai")
+        self.assertEqual(values["llm.zai.api_key"], "zai-test-key")
+
+    def test_run_llm_provider_wizard_collects_key_for_explicit_zai_selection(self) -> None:
+        class Args:
+            llm_provider = "zai"
+            chat_llm_provider = None
+            builder_llm_provider = None
+            memory_llm_provider = None
+            mission_llm_provider = None
+
+        args = Args()
+        with patch("spark_cli.cli.getpass.getpass", return_value="zai-test-key"):
+            values = run_llm_provider_wizard(args, {})
+        self.assertEqual(values["llm.zai.api_key"], "zai-test-key")
+
+    def test_run_llm_provider_wizard_can_customize_roles(self) -> None:
+        class Args:
+            llm_provider = None
+            chat_llm_provider = None
+            builder_llm_provider = None
+            memory_llm_provider = None
+            mission_llm_provider = None
+
+        args = Args()
+        answers = ["zai", "yes", "zai", "openai", "ollama", "codex"]
+        with patch("builtins.input", side_effect=answers), \
+             patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
+             patch("spark_cli.cli.getpass.getpass", return_value="zai-test-key"):
+            values = run_llm_provider_wizard(args, {})
+        self.assertEqual(args.llm_provider, "zai")
+        self.assertEqual(args.chat_llm_provider, "zai")
+        self.assertEqual(args.builder_llm_provider, "openai")
+        self.assertEqual(args.memory_llm_provider, "ollama")
+        self.assertEqual(args.mission_llm_provider, "codex")
         self.assertEqual(values["llm.zai.api_key"], "zai-test-key")
 
     def test_run_llm_provider_wizard_defaults_to_openai_codex_oauth(self) -> None:
@@ -2111,7 +2145,7 @@ class SparkCliTests(unittest.TestCase):
             mission_llm_provider = None
 
         args = Args()
-        with patch("builtins.input", return_value=""), \
+        with patch("builtins.input", side_effect=["", ""]), \
              patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
              patch("spark_cli.cli.getpass.getpass") as getpass_mock:
             values = run_llm_provider_wizard(args, {})

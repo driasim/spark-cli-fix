@@ -799,11 +799,15 @@ def run_setup_wizard(
     requirements: dict[str, dict[str, Any]],
 ) -> dict[str, str]:
     collected = dict(existing_values)
-    to_prompt = [secret_id for secret_id in requirements if secret_id not in collected]
+    to_prompt = [
+        secret_id
+        for secret_id, requirement in requirements.items()
+        if secret_id not in collected and requirement.get("required")
+    ]
     if not to_prompt:
         return collected
     print("")
-    print("Spark setup wizard -- enter the secrets this bundle needs (input is hidden).")
+    print("Spark setup wizard -- first, enter the required Telegram setup values (input is hidden).")
     for secret_id in to_prompt:
         value = prompt_for_secret(secret_id, requirements[secret_id])
         if value:
@@ -905,6 +909,26 @@ LLM_PROVIDER_ENV: dict[str, dict[str, str]] = {
 LLM_PROVIDER_CHOICES = sorted(provider for provider in LLM_PROVIDER_ENV if provider != "not_configured")
 LLM_ROLES = ("chat", "builder", "memory", "mission")
 LLM_PROVIDER_WIZARD_ORDER = ("openai", "codex", "anthropic", "zai", "ollama")
+LLM_ROLE_LABELS = {
+    "chat": "Telegram chat replies",
+    "builder": "Builder reasoning",
+    "memory": "memory synthesis and recall",
+    "mission": "Spawner missions and coding work",
+}
+LLM_PROVIDER_LABELS = {
+    "openai": "OpenAI",
+    "codex": "Codex CLI / ChatGPT sign-in",
+    "anthropic": "Anthropic / Claude",
+    "zai": "Z.AI / GLM coding endpoint",
+    "ollama": "Ollama local",
+}
+LLM_PROVIDER_AUTH_HINTS = {
+    "openai": "signed-in Codex CLI or OPENAI_API_KEY",
+    "codex": "signed-in Codex CLI",
+    "anthropic": "Claude Code sign-in or ANTHROPIC_API_KEY",
+    "zai": "ZAI_API_KEY",
+    "ollama": "local Ollama server",
+}
 
 
 def setup_has_llm_provider_selection(args: argparse.Namespace) -> bool:
@@ -923,54 +947,103 @@ def provider_requires_wizard_api_key(provider: str) -> bool:
     return False
 
 
-def run_llm_provider_wizard(args: argparse.Namespace, secret_values: dict[str, str]) -> dict[str, str]:
-    if setup_has_llm_provider_selection(args):
-        return secret_values
-    if resolve_llm_provider(args, secret_values) != "not_configured":
-        return secret_values
-    print("")
-    print("Choose Spark LLM provider")
-    print("  This controls chat, Builder, memory, and mission roles. You can split roles later.")
-    for index, provider in enumerate(LLM_PROVIDER_WIZARD_ORDER, start=1):
-        spec = LLM_PROVIDER_ENV[provider]
-        auth_hint = {
-            "openai": "Codex CLI sign-in or OPENAI_API_KEY",
-            "codex": "Codex CLI sign-in",
-            "anthropic": "Claude Code sign-in or ANTHROPIC_API_KEY",
-            "zai": "Z.AI / GLM API key",
-            "ollama": "local Ollama server",
-        }[provider]
-        print(f"  {index}. {provider} ({spec['model_default']}; {auth_hint})")
-    print("  0. Skip for now")
-    try:
-        answer = input("Provider [1/openai, 0 to skip]: ").strip().lower()
-    except EOFError:
-        return secret_values
-    if not answer:
-        answer = "openai"
-    if answer in {"0", "skip", "none", "not_configured"}:
-        return secret_values
+def prompt_for_provider_choice(prompt: str, default: str) -> str | None:
     provider_by_number = {str(index): provider for index, provider in enumerate(LLM_PROVIDER_WIZARD_ORDER, start=1)}
+    try:
+        answer = input(prompt).strip().lower()
+    except EOFError:
+        return None
+    if not answer:
+        answer = default
+    if answer in {"0", "skip", "none", "not_configured"}:
+        return "not_configured"
     provider = provider_by_number.get(answer, answer)
     if provider not in LLM_PROVIDER_CHOICES:
-        print(f"Unknown provider `{answer}`; leaving LLM provider unconfigured.")
-        return secret_values
-    setattr(args, "llm_provider", provider)
-    spec = LLM_PROVIDER_ENV[provider]
-    secret_id = spec.get("api_key_secret")
-    if secret_id and provider_requires_wizard_api_key(provider) and not secret_values.get(secret_id):
+        print(f"  Unknown provider `{answer}`.")
+        return None
+    return provider
+
+
+def selected_llm_providers(args: argparse.Namespace, secret_values: dict[str, str]) -> list[str]:
+    providers: list[str] = []
+    default_provider = resolve_llm_provider(args, secret_values)
+    if default_provider != "not_configured":
+        providers.append(default_provider)
+    for role in LLM_ROLES:
+        provider = getattr(args, f"{role}_llm_provider", None)
+        if provider and provider not in providers:
+            providers.append(str(provider))
+    return providers
+
+
+def collect_provider_api_keys(providers: list[str], secret_values: dict[str, str]) -> dict[str, str]:
+    updated = dict(secret_values)
+    for provider in providers:
+        if provider == "not_configured":
+            continue
+        spec = LLM_PROVIDER_ENV[provider]
+        secret_id = spec.get("api_key_secret")
+        if not secret_id or updated.get(secret_id) or not provider_requires_wizard_api_key(provider):
+            continue
+        label = LLM_PROVIDER_LABELS.get(provider, provider)
+        hint = LLM_PROVIDER_AUTH_HINTS.get(provider, "API key")
+        print(f"")
+        print(f"{label} needs {hint} for this setup.")
+        if provider == "zai":
+            print(f"  Endpoint: {spec['base_url_default']}")
+            print(f"  Model: {spec['model_default']} (override with --zai-model if needed)")
         value = prompt_for_secret(
             str(secret_id),
             {
-                "prompt": f"{provider} API key",
+                "prompt": f"{label} API key",
                 "required": True,
             },
         )
         if value:
-            updated = dict(secret_values)
             updated[str(secret_id)] = value
-            return updated
-    return secret_values
+    return updated
+
+
+def run_llm_provider_wizard(args: argparse.Namespace, secret_values: dict[str, str]) -> dict[str, str]:
+    if setup_has_llm_provider_selection(args):
+        return collect_provider_api_keys(selected_llm_providers(args, secret_values), secret_values)
+    if resolve_llm_provider(args, secret_values) != "not_configured":
+        return collect_provider_api_keys(selected_llm_providers(args, secret_values), secret_values)
+    print("")
+    print("Choose Spark LLM provider")
+    print("  Pick the default LLM for chat, Builder, memory, and missions.")
+    print("  You can keep one provider for everything, or customize each role next.")
+    for index, provider in enumerate(LLM_PROVIDER_WIZARD_ORDER, start=1):
+        spec = LLM_PROVIDER_ENV[provider]
+        label = LLM_PROVIDER_LABELS[provider]
+        auth_hint = LLM_PROVIDER_AUTH_HINTS[provider]
+        print(f"  {index}. {label} ({spec['model_default']}; {auth_hint})")
+    print("  0. Skip for now")
+    provider = prompt_for_provider_choice("Provider [1/OpenAI, 0 to skip]: ", "openai")
+    if provider is None:
+        return secret_values
+    if provider == "not_configured":
+        return secret_values
+    setattr(args, "llm_provider", provider)
+
+    try:
+        split_roles = input("Use different providers for chat/building/memory/missions? [y/N]: ").strip().lower()
+    except EOFError:
+        split_roles = ""
+    if split_roles in {"y", "yes"}:
+        for role in LLM_ROLES:
+            label = LLM_ROLE_LABELS[role]
+            chosen = prompt_for_provider_choice(f"  {label} provider [{provider}]: ", provider)
+            if chosen and chosen != "not_configured":
+                setattr(args, f"{role}_llm_provider", chosen)
+
+    roles = resolve_llm_roles(args, secret_values)
+    print("")
+    print("Spark LLM roles selected:")
+    for role in LLM_ROLES:
+        role_provider = roles[role]
+        print(f"  {role}: {LLM_PROVIDER_LABELS.get(role_provider, role_provider)}")
+    return collect_provider_api_keys(selected_llm_providers(args, secret_values), secret_values)
 
 
 def resolve_llm_provider(args: argparse.Namespace, secret_values: dict[str, str]) -> str:

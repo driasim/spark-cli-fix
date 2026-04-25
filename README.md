@@ -105,7 +105,9 @@ bash ./install.sh \
 
 That command installs and wires the starter stack, but it intentionally does not invent an LLM provider. If no provider is chosen, `spark status` and `spark fix telegram` report the LLM roles as not configured instead of silently falling back to a local model.
 
-To wire LLMs during setup, run interactive `spark setup` and choose a provider from the prompt, or pass one default provider / role-specific providers in the command. Spark supports the same onboarding shape on Windows, macOS, Linux, and WSL:
+To wire LLMs during setup, run interactive `spark setup` and choose from the provider menu. The wizard first asks for Telegram/BotFather values, then asks which LLM provider should power Spark, then only asks for the key that provider actually needs. You can keep one provider for all roles or split chat, Builder, memory, and mission work during the same flow.
+
+Spark supports the same onboarding shape on Windows, macOS, Linux, and WSL:
 
 ```bash
 bash ./install.sh \
@@ -123,6 +125,7 @@ Provider options:
 | Provider | Good first path | Key-based path |
 |---|---|---|
 | OpenAI | Sign in with `codex`, then run `spark setup --llm-provider openai` | `spark setup --llm-provider openai --openai-api-key <OPENAI_API_KEY>` |
+| Codex CLI | Sign in with `codex`, then run `spark setup --llm-provider codex` | Uses the signed-in Codex CLI, no API key flag |
 | Anthropic | Sign in with `claude`, then run `spark setup --llm-provider anthropic` | `spark setup --llm-provider anthropic --anthropic-api-key <ANTHROPIC_API_KEY>` |
 | Z.AI / GLM | Use the coding endpoint key | `spark setup --llm-provider zai --zai-api-key <ZAI_API_KEY>` |
 | Ollama | Start Ollama locally | `spark setup --llm-provider ollama --ollama-url http://localhost:11434 --ollama-model <MODEL>` |
