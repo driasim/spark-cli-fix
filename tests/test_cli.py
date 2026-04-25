@@ -2884,6 +2884,35 @@ class SparkCliTests(unittest.TestCase):
         )
         self.assertIn("LLM provider uses Z.AI but is missing an API key. Re-run `spark setup --llm-provider zai --zai-api-key <key>`.", hints)
 
+    def test_build_status_repair_hints_reports_missing_starter_runtime_process(self) -> None:
+        spawner = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={
+                "module": {"name": "spawner-ui", "version": "1.0.0", "kind": "app", "plane": "execution"}
+            },
+        )
+        gateway = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"}
+            },
+        )
+        with patch("spark_cli.cli.resolve_bundle_names", return_value=["spawner-ui", "spark-telegram-bot"]), \
+             patch("spark_cli.cli.pid_is_running", return_value=False):
+            hints = build_status_repair_hints(
+                {spawner.name: spawner, gateway.name: gateway},
+                [
+                    {"name": "spawner-ui", "healthy": True},
+                    {"name": "spark-telegram-bot", "healthy": True},
+                ],
+                {"bundle": "telegram-starter", "llm": {"provider": "zai", "api_key_configured": True}},
+                {"spawner-ui": {"pid": 101}, "spark-telegram-bot": {"pid": 102}},
+            )
+        self.assertTrue(any("Missing Spark-supervised runtime process(es)" in hint for hint in hints))
+        self.assertTrue(any("spark start telegram-starter" in hint for hint in hints))
+
     def test_build_status_repair_hints_uses_legacy_secret_keys_for_api_auth(self) -> None:
         hints = build_status_repair_hints(
             {},
@@ -3000,6 +3029,42 @@ class SparkCliTests(unittest.TestCase):
         self.assertFalse(checks["bot_token"]["ok"])
         self.assertIn("Telegram rejected it", checks["bot_token"]["detail"])
         self.assertEqual(checks["bot_token"]["repair"], "spark setup --bot-token <BOTFATHER_TOKEN>")
+
+    def test_collect_telegram_fix_payload_reports_polling_conflict_from_logs(self) -> None:
+        status_payload = {
+            "ok": False,
+            "modules": [
+                {
+                    "name": "spark-telegram-bot",
+                    "healthy": True,
+                    "detail": "Relay auth: configured",
+                },
+            ],
+            "tracked_pids": {},
+            "llm": {
+                "provider": "zai",
+                "roles": {
+                    "chat": {"provider": "zai", "auth_mode": "api_key"},
+                    "builder": {"provider": "zai", "auth_mode": "api_key"},
+                    "memory": {"provider": "zai", "auth_mode": "api_key"},
+                    "mission": {"provider": "zai", "auth_mode": "api_key"},
+                },
+            },
+            "repair_hints": [],
+        }
+        conflict_log = [
+            "Failed to start bot: TelegramError: 409: Conflict: terminated by other getUpdates request\n",
+        ]
+        with patch("spark_cli.cli.collect_status_payload", return_value=status_payload), \
+             patch("spark_cli.cli.load_json", return_value={"secret_keys": ["telegram.bot_token", "telegram.admin_ids"]}), \
+             patch("spark_cli.cli.read_generated_env", return_value={"SPARK_BUILDER_BRIDGE_MODE": "required", "SPARK_BUILDER_HOME": "C:/tmp/spark"}), \
+             patch("spark_cli.cli.tail_log_lines", return_value=conflict_log):
+            payload = collect_telegram_fix_payload()
+
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(checks["telegram_process"]["ok"])
+        self.assertIn("409 getUpdates conflict", checks["telegram_process"]["detail"])
+        self.assertIn("fresh BotFather token", checks["telegram_process"]["repair"])
 
     def test_provider_status_payload_reports_role_readiness(self) -> None:
         setup_state = {

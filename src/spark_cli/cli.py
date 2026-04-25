@@ -1965,6 +1965,7 @@ def build_status_repair_hints(
     modules: dict[str, Module],
     module_results: list[dict[str, Any]],
     setup_state: dict[str, Any],
+    tracked_pids: dict[str, Any] | None = None,
 ) -> list[str]:
     hints: list[str] = []
     bundle_name = setup_state.get("bundle")
@@ -1996,6 +1997,16 @@ def build_status_repair_hints(
     if isinstance(llm_state, dict):
         setup_secret_keys = set(setup_state.get("secret_keys", []))
         hints.extend(build_llm_repair_hints(llm_state, secret_keys=setup_secret_keys))
+    if bundle_name:
+        expected_runtime_names = [
+            name
+            for name in ("spawner-ui", "spark-telegram-bot")
+            if name in installed_names
+        ]
+        if expected_runtime_names:
+            process_ok, process_detail = process_runtime_detail(tracked_pids or {}, expected_runtime_names)
+            if not process_ok:
+                hints.append(f"{process_detail} Run `spark start {bundle_name}`.")
     module_results_by_name = {item["name"]: item for item in module_results}
     for module in modules.values():
         missing_dependencies, unhealthy_dependencies = dependency_issues_for_module(module, module_results_by_name)
@@ -2477,7 +2488,8 @@ def collect_status_payload() -> dict[str, Any]:
             module_results_by_name,
             setup_state,
         )
-    repair_hints = build_status_repair_hints(modules, module_results, setup_state)
+    tracked_pids = load_pids()
+    repair_hints = build_status_repair_hints(modules, module_results, setup_state, tracked_pids)
     ok = all(item["healthy"] is not False for item in module_results) and not repair_hints
     return {
         "ok": ok,
@@ -2485,7 +2497,7 @@ def collect_status_payload() -> dict[str, Any]:
         "telegram_ingress_owner": setup_state.get("telegram_ingress_owner"),
         "llm": setup_state.get("llm"),
         "modules": module_results,
-        "tracked_pids": load_pids(),
+        "tracked_pids": tracked_pids,
         "config_dir": str(CONFIG_DIR),
         "repair_hints": repair_hints,
     }
@@ -2571,6 +2583,11 @@ def collect_telegram_fix_payload() -> dict[str, Any]:
     llm_hints = build_llm_repair_hints(llm_state) if llm_state else [
         "No LLM provider is configured. Run `spark setup` to choose chat, builder, memory, and mission providers."
     ]
+    recent_gateway_log = "".join(tail_log_lines(module_log_path("spark-telegram-bot"), 120))
+    polling_conflict = (
+        "409: Conflict" in recent_gateway_log
+        and "getUpdates" in recent_gateway_log
+    )
 
     checks: list[dict[str, Any]] = []
     checks.append(
@@ -2647,12 +2664,21 @@ def collect_telegram_fix_payload() -> dict[str, Any]:
     process_running = False
     if isinstance(telegram_pid, dict):
         process_running = pid_is_running(int(telegram_pid.get("pid", 0)))
+    process_detail = (
+        f"spark-telegram-bot is running (pid {telegram_pid.get('pid')})."
+        if process_running and isinstance(telegram_pid, dict)
+        else "spark-telegram-bot is not running under Spark supervision."
+    )
+    process_repair = "spark restart telegram-starter"
+    if not process_running and polling_conflict:
+        process_detail += " Recent logs show Telegram 409 getUpdates conflict, which means another copy of this bot is already polling Telegram."
+        process_repair = "Stop the other bot process or use a fresh BotFather token, then run `spark restart telegram-starter`."
     checks.append(
         {
             "name": "telegram_process",
             "ok": process_running,
-            "detail": f"spark-telegram-bot is running (pid {telegram_pid.get('pid')})." if process_running and isinstance(telegram_pid, dict) else "spark-telegram-bot is not running under Spark supervision.",
-            "repair": "spark restart telegram-starter",
+            "detail": process_detail,
+            "repair": process_repair,
         }
     )
 
