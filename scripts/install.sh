@@ -6,6 +6,7 @@ SPARK_CLI_SOURCE="${SPARK_CLI_SOURCE:-https://github.com/vibeforge1111/spark-cli
 SPARK_CLI_REF="${SPARK_CLI_REF:-}"
 SPARK_NODE_VERSION="${SPARK_NODE_VERSION:-22.18.0}"
 SPARK_SKIP_SETUP="${SPARK_SKIP_SETUP:-0}"
+SPARK_AUTOSTART="${SPARK_AUTOSTART:-1}"
 SPARK_BUNDLE="${SPARK_BUNDLE:-telegram-starter}"
 SPARK_SETUP_ARGS="${SPARK_SETUP_ARGS:-}"
 SPARK_LOCAL_REGISTRY="${SPARK_LOCAL_REGISTRY:-}"
@@ -26,11 +27,13 @@ Options:
   --setup-arg ARG           Extra arg passed to `spark setup`; repeatable
   --local-registry PATH     Copy a registry.json override before setup
   --skip-setup              Install CLI only; do not run spark setup
+  --no-autostart            Do not install the login autostart hook after setup
   -h, --help                Show this help
 
 Environment mirrors these flags:
   SPARK_PREFIX, SPARK_CLI_SOURCE, SPARK_CLI_REF, SPARK_NODE_VERSION,
   SPARK_BUNDLE, SPARK_SETUP_ARGS, SPARK_LOCAL_REGISTRY, SPARK_SKIP_SETUP,
+  SPARK_AUTOSTART,
   SPARK_NODE_PLATFORM.
 EOF
 }
@@ -54,6 +57,8 @@ while [ "$#" -gt 0 ]; do
       SPARK_LOCAL_REGISTRY="$2"; shift 2 ;;
     --skip-setup)
       SPARK_SKIP_SETUP=1; shift ;;
+    --no-autostart)
+      SPARK_AUTOSTART=0; shift ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -240,6 +245,34 @@ EOF
   "${spark_setup_cmd[@]}"
 }
 
+run_autostart() {
+  if [ "$SPARK_SKIP_SETUP" = "1" ]; then
+    return
+  fi
+  if [ "$SPARK_AUTOSTART" != "1" ]; then
+    log "Skipping Spark autostart"
+    cat <<EOF
+
+To start Spark manually:
+  $SPARK_PREFIX/bin/spark start $SPARK_BUNDLE
+EOF
+    return
+  fi
+
+  log "Installing Spark autostart"
+  if ! "$SPARK_PREFIX/bin/spark" autostart install "$SPARK_BUNDLE" --now; then
+    cat <<EOF
+
+Spark autostart could not be enabled automatically.
+Manual fallback for this session:
+  $SPARK_PREFIX/bin/spark start $SPARK_BUNDLE
+
+To try autostart again:
+  $SPARK_PREFIX/bin/spark autostart install --now
+EOF
+  fi
+}
+
 main() {
   need_cmd python3
   SPARK_PREFIX="$(normalize_path "$SPARK_PREFIX")"
@@ -254,6 +287,7 @@ main() {
   install_cli_venv
   write_wrapper
   run_setup
+  run_autostart
   log "Done."
   cat <<EOF
 
@@ -269,8 +303,8 @@ To make that permanent, add this line to your shell profile:
 
 Operational checks:
   $SPARK_PREFIX/bin/spark status
-  $SPARK_PREFIX/bin/spark start spawner-ui
-  $SPARK_PREFIX/bin/spark start spark-telegram-bot
+  $SPARK_PREFIX/bin/spark autostart status
+  $SPARK_PREFIX/bin/spark logs spark-telegram-bot
 EOF
 }
 

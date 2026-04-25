@@ -88,6 +88,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 The launch docs intentionally avoid piping remote scripts directly into a shell. The installer also verifies the managed Node archive against Node's published `SHASUMS256.txt` before extraction.
 
+After setup, the macOS/Linux/WSL installer runs `spark autostart install --now` by default. That starts the Telegram starter stack immediately and installs the operating-system login hook so Spark comes back after the computer logs in. Use `--no-autostart` or `SPARK_AUTOSTART=0` if you only want to install/configure and start Spark manually later.
+
 For scripted setup:
 
 ```bash

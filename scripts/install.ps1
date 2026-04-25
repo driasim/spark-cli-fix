@@ -6,7 +6,8 @@ param(
     [string]$Bundle = "telegram-starter",
     [string[]]$SetupArg = @(),
     [string]$LocalRegistry = "",
-    [switch]$SkipSetup
+    [switch]$SkipSetup,
+    [switch]$NoAutostart
 )
 
 $ErrorActionPreference = "Stop"
@@ -152,6 +153,32 @@ function Run-Setup {
     }
 }
 
+function Run-Autostart {
+    if ($SkipSetup) {
+        return
+    }
+    $sparkCmd = Join-Path $Script:SparkPrefix "bin\spark.cmd"
+    if ($NoAutostart) {
+        Write-SparkLog "Skipping Spark autostart"
+        Write-Host ""
+        Write-Host "To start Spark manually:"
+        Write-Host "  $sparkCmd start $Bundle"
+        return
+    }
+
+    Write-SparkLog "Installing Spark autostart"
+    & $sparkCmd autostart install $Bundle --now
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Spark autostart could not be enabled automatically."
+        Write-Host ""
+        Write-Host "Manual fallback for this session:"
+        Write-Host "  $sparkCmd start $Bundle"
+        Write-Host ""
+        Write-Host "To try autostart again:"
+        Write-Host "  $sparkCmd autostart install --now"
+    }
+}
+
 Require-Command python
 $Script:SparkPrefix = Resolve-FullPath $Prefix
 New-Item -ItemType Directory -Force -Path $Script:SparkPrefix | Out-Null
@@ -162,6 +189,7 @@ $cliDir = Checkout-Cli
 $venvDir = Install-CliVenv -CliDir $cliDir
 Write-Wrapper -NodeDir $nodeDir -VenvDir $venvDir
 Run-Setup -CliDir $cliDir
+Run-Autostart
 Write-SparkLog "Done."
 Write-Host ""
 Write-Host "Spark command:"
@@ -170,5 +198,5 @@ Write-Host "  $Script:SparkPrefix\bin\spark.cmd guide"
 Write-Host ""
 Write-Host "Operational checks:"
 Write-Host "  $Script:SparkPrefix\bin\spark.cmd status"
-Write-Host "  $Script:SparkPrefix\bin\spark.cmd start spawner-ui"
-Write-Host "  $Script:SparkPrefix\bin\spark.cmd start spark-telegram-bot"
+Write-Host "  $Script:SparkPrefix\bin\spark.cmd autostart status"
+Write-Host "  $Script:SparkPrefix\bin\spark.cmd logs spark-telegram-bot"

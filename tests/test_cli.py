@@ -1870,10 +1870,13 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("python3 -m venv", script)
         self.assertIn("pip install -e", script)
         self.assertIn("SPARK_LOCAL_REGISTRY", script)
+        self.assertIn('SPARK_AUTOSTART="${SPARK_AUTOSTART:-1}"', script)
+        self.assertIn("--no-autostart", script)
         self.assertIn('export SPARK_HOME="$SPARK_PREFIX"', script)
         self.assertIn('local env_file="$SPARK_PREFIX/env"', script)
         self.assertIn('export PATH="$SPARK_PREFIX/bin:$SPARK_PREFIX/tools/node-v$SPARK_NODE_VERSION-$SPARK_NODE_PLATFORM/bin:\\$PATH"', script)
         self.assertIn('"$SPARK_PREFIX/bin/spark" setup "$SPARK_BUNDLE"', script)
+        self.assertIn('"$SPARK_PREFIX/bin/spark" autostart install "$SPARK_BUNDLE" --now', script)
         self.assertIn('local spark_setup_cmd=("$SPARK_PREFIX/bin/spark" setup "$SPARK_BUNDLE")', script)
         self.assertNotIn('"${setup_words[@]}" "${extra_setup_args[@]}"', script)
         self.assertIn('source "$SPARK_PREFIX/env"', script)
@@ -1891,6 +1894,8 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("$env:PATH = \"$nodeDir;$env:PATH\"", script)
         self.assertIn('set "SPARK_HOME=$Script:SparkPrefix"', script)
         self.assertIn("& $sparkCmd setup $Bundle @SetupArg", script)
+        self.assertIn("[switch]$NoAutostart", script)
+        self.assertIn("& $sparkCmd autostart install $Bundle --now", script)
 
     def test_readme_does_not_recommend_piping_remote_installers_to_shell(self) -> None:
         readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
