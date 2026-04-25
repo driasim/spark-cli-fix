@@ -848,9 +848,83 @@ LLM_PROVIDER_ENV: dict[str, dict[str, str]] = {
         "model_default": "gpt-5.5",
         "bot_provider": "codex",
     },
+    "not_configured": {
+        "model_arg": "not_configured_model",
+        "model_env": "SPARK_UNCONFIGURED_LLM_MODEL",
+        "model_default": "",
+        "bot_provider": "none",
+    },
 }
 
+LLM_PROVIDER_CHOICES = sorted(provider for provider in LLM_PROVIDER_ENV if provider != "not_configured")
 LLM_ROLES = ("chat", "builder", "memory", "mission")
+LLM_PROVIDER_WIZARD_ORDER = ("openai", "codex", "anthropic", "zai", "ollama")
+
+
+def setup_has_llm_provider_selection(args: argparse.Namespace) -> bool:
+    if getattr(args, "llm_provider", None):
+        return True
+    return any(getattr(args, f"{role}_llm_provider", None) for role in LLM_ROLES)
+
+
+def provider_requires_wizard_api_key(provider: str) -> bool:
+    if provider == "zai":
+        return True
+    if provider == "openai":
+        return not detect_codex_cli()["present"]
+    if provider == "anthropic":
+        return not detect_claude_code()["present"]
+    return False
+
+
+def run_llm_provider_wizard(args: argparse.Namespace, secret_values: dict[str, str]) -> dict[str, str]:
+    if setup_has_llm_provider_selection(args):
+        return secret_values
+    if resolve_llm_provider(args, secret_values) != "not_configured":
+        return secret_values
+    print("")
+    print("Choose Spark LLM provider")
+    print("  This controls chat, Builder, memory, and mission roles. You can split roles later.")
+    for index, provider in enumerate(LLM_PROVIDER_WIZARD_ORDER, start=1):
+        spec = LLM_PROVIDER_ENV[provider]
+        auth_hint = {
+            "openai": "Codex CLI sign-in or OPENAI_API_KEY",
+            "codex": "Codex CLI sign-in",
+            "anthropic": "Claude Code sign-in or ANTHROPIC_API_KEY",
+            "zai": "Z.AI / GLM API key",
+            "ollama": "local Ollama server",
+        }[provider]
+        print(f"  {index}. {provider} ({spec['model_default']}; {auth_hint})")
+    print("  0. Skip for now")
+    try:
+        answer = input("Provider [1/openai, 0 to skip]: ").strip().lower()
+    except EOFError:
+        return secret_values
+    if not answer:
+        answer = "openai"
+    if answer in {"0", "skip", "none", "not_configured"}:
+        return secret_values
+    provider_by_number = {str(index): provider for index, provider in enumerate(LLM_PROVIDER_WIZARD_ORDER, start=1)}
+    provider = provider_by_number.get(answer, answer)
+    if provider not in LLM_PROVIDER_CHOICES:
+        print(f"Unknown provider `{answer}`; leaving LLM provider unconfigured.")
+        return secret_values
+    setattr(args, "llm_provider", provider)
+    spec = LLM_PROVIDER_ENV[provider]
+    secret_id = spec.get("api_key_secret")
+    if secret_id and provider_requires_wizard_api_key(provider) and not secret_values.get(secret_id):
+        value = prompt_for_secret(
+            str(secret_id),
+            {
+                "prompt": f"{provider} API key",
+                "required": True,
+            },
+        )
+        if value:
+            updated = dict(secret_values)
+            updated[str(secret_id)] = value
+            return updated
+    return secret_values
 
 
 def resolve_llm_provider(args: argparse.Namespace, secret_values: dict[str, str]) -> str:
@@ -861,7 +935,7 @@ def resolve_llm_provider(args: argparse.Namespace, secret_values: dict[str, str]
         secret_id = spec.get("api_key_secret")
         if secret_id and secret_values.get(secret_id):
             return provider
-    return "ollama"
+    return "not_configured"
 
 
 def resolve_llm_roles(args: argparse.Namespace, secret_values: dict[str, str]) -> dict[str, str]:
@@ -873,6 +947,8 @@ def resolve_llm_roles(args: argparse.Namespace, secret_values: dict[str, str]) -
 
 
 def provider_auth_mode(provider: str, env: dict[str, str]) -> str:
+    if provider == "not_configured":
+        return "not_configured"
     spec = LLM_PROVIDER_ENV[provider]
     api_key_env = spec.get("api_key_env")
     if api_key_env and env.get(api_key_env):
@@ -906,6 +982,8 @@ def build_llm_env(args: argparse.Namespace, secret_values: dict[str, str]) -> tu
 
     for provider_name in sorted(set(roles.values())):
         provider_spec = LLM_PROVIDER_ENV[provider_name]
+        if provider_name == "not_configured":
+            continue
         if provider_name in {"codex", "openai"}:
             codex = detect_codex_cli()
             if codex["present"]:
@@ -960,6 +1038,7 @@ def llm_setup_state(provider: str, env: dict[str, str]) -> dict[str, Any]:
         }
     return {
         "provider": provider,
+        "configured": provider != "not_configured",
         "bot_default_provider": spec["bot_provider"],
         "base_url_env": spec.get("base_url_env"),
         "model_env": spec["model_env"],
@@ -1711,19 +1790,12 @@ def build_status_repair_hints(
             f"Configured Telegram ingress owner `{ingress_owner}` is not installed. Run `spark setup {bundle_name or 'telegram-starter'}`."
         )
     llm_state = setup_state.get("llm")
-    if not isinstance(llm_state, dict) or not llm_state.get("provider"):
+    if not isinstance(llm_state, dict) or not llm_state.get("provider") or llm_state.get("provider") == "not_configured":
         hints.append(
             "No LLM provider is configured. Run `spark setup` to choose chat, builder, memory, and mission providers."
         )
-    elif llm_state.get("provider") in {"zai", "anthropic"} and not llm_state.get("api_key_configured"):
-        provider = llm_state["provider"]
-        flag = {
-            "zai": "--zai-api-key",
-            "anthropic": "--anthropic-api-key",
-        }[str(provider)]
-        hints.append(f"LLM provider `{provider}` is missing an API key. Re-run `spark setup --llm-provider {provider} {flag} <key>`.")
-    elif llm_state.get("provider") == "openai" and llm_state.get("auth_mode") == "not_configured":
-        hints.append("OpenAI is selected but neither Codex CLI OAuth nor OPENAI_API_KEY is configured. Run `codex` to sign in with ChatGPT, or rerun `spark setup --llm-provider openai --openai-api-key <key>`.")
+    if isinstance(llm_state, dict):
+        hints.extend(build_llm_repair_hints(llm_state))
     module_results_by_name = {item["name"]: item for item in module_results}
     for module in modules.values():
         missing_dependencies, unhealthy_dependencies = dependency_issues_for_module(module, module_results_by_name)
@@ -1740,6 +1812,43 @@ def build_status_repair_hints(
         if hint not in deduped:
             deduped.append(hint)
     return deduped
+
+
+def build_llm_repair_hints(llm_state: dict[str, Any]) -> list[str]:
+    hints: list[str] = []
+    roles = llm_state.get("roles")
+    if isinstance(roles, dict):
+        role_items = [(role, roles.get(role, {})) for role in LLM_ROLES]
+    else:
+        role_items = [("all", llm_state)]
+    for role, state in role_items:
+        if not isinstance(state, dict):
+            continue
+        provider = str(state.get("provider") or llm_state.get("provider") or "not_configured")
+        auth_mode = str(state.get("auth_mode") or llm_state.get("auth_mode") or "not_configured")
+        role_label = "LLM provider" if role == "all" else f"LLM role `{role}`"
+        role_flag = "--llm-provider" if role == "all" else f"--{role}-llm-provider"
+        if provider == "not_configured":
+            hints.append(
+                f"{role_label} is not configured. Run `spark setup {role_flag} openai` to use Codex/OpenAI, or choose anthropic, zai, ollama, or codex."
+            )
+        elif provider == "zai" and auth_mode == "not_configured":
+            hints.append(
+                f"{role_label} uses Z.AI but is missing an API key. Re-run `spark setup {role_flag} zai --zai-api-key <key>`."
+            )
+        elif provider == "anthropic" and auth_mode == "not_configured":
+            hints.append(
+                f"{role_label} uses Anthropic but neither Claude Code nor ANTHROPIC_API_KEY is configured. Run `claude` to sign in, or rerun `spark setup {role_flag} anthropic --anthropic-api-key <key>`."
+            )
+        elif provider == "openai" and auth_mode == "not_configured":
+            hints.append(
+                f"{role_label} uses OpenAI but neither Codex CLI OAuth nor OPENAI_API_KEY is configured. Run `codex` to sign in with ChatGPT, or rerun `spark setup {role_flag} openai --openai-api-key <key>`."
+            )
+        elif provider == "codex" and auth_mode == "not_configured":
+            hints.append(
+                f"{role_label} uses Codex but the Codex CLI is not signed in or not on PATH. Run `codex` first, then rerun `spark setup {role_flag} codex`."
+            )
+    return hints
 
 
 def cmd_install(args: argparse.Namespace) -> int:
@@ -1841,7 +1950,10 @@ def print_setup_next_steps(bundle_name: str, ingress_owner: Module, llm_state: d
     print("     /diagnose")
     print("  5. Send a normal message and confirm the LLM responds.")
     print("")
-    print(f"LLM provider: {provider} ({model})")
+    if provider == "not_configured":
+        print("LLM provider: not configured yet")
+    else:
+        print(f"LLM provider: {provider} ({model})")
     if roles:
         print("LLM roles:")
         for role in LLM_ROLES:
@@ -1852,7 +1964,7 @@ def print_setup_next_steps(bundle_name: str, ingress_owner: Module, llm_state: d
             )
     print("Need a bot token? Open @BotFather in Telegram, run /newbot, then rerun:")
     print(f"     spark setup {bundle_name}")
-    print("Need to change LLMs? Rerun setup with --chat-llm-provider, --builder-llm-provider, --memory-llm-provider, or --mission-llm-provider.")
+    print("Need to choose or change LLMs? Rerun setup with --llm-provider or the role flags: --chat-llm-provider, --builder-llm-provider, --memory-llm-provider, --mission-llm-provider.")
     print("OpenAI can use an OPENAI_API_KEY or a signed-in Codex CLI (`codex`); Anthropic can use an API key or Claude Code (`claude`).")
     print("Need to turn the agent off? Run `spark stop telegram-starter` or `spark autostart uninstall`.")
     print("Run `spark guide` anytime for BotFather, LLM, module, and Telegram command help.")
@@ -1880,6 +1992,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print_setup_preflight(bundle)
     secret_values = collect_secret_values(args, bundle, interactive=interactive)
     secret_values = ensure_generated_setup_secrets(secret_values, bundle)
+    if interactive:
+        secret_values = run_llm_provider_wizard(args, secret_values)
     llm_provider, llm_env = build_llm_env(args, secret_values)
 
     setup_state = {
@@ -2099,8 +2213,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"Telegram ingress owner: {ingress_owner}")
     llm_state = payload.get("llm")
     if isinstance(llm_state, dict) and llm_state.get("provider"):
-        model = llm_state.get("model") or "default"
-        print(f"LLM provider: {llm_state['provider']} ({model})")
+        if llm_state["provider"] == "not_configured":
+            print("LLM provider: not configured")
+        else:
+            model = llm_state.get("model") or "default"
+            print(f"LLM provider: {llm_state['provider']} ({model})")
         roles = llm_state.get("roles")
         if isinstance(roles, dict):
             role_summary = ", ".join(
@@ -2140,6 +2257,449 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("Spark CLI spike doctor")
         print(json.dumps(payload, indent=2))
     return 0 if payload.get("ok") else 1
+
+
+def collect_telegram_fix_payload() -> dict[str, Any]:
+    status_payload = collect_status_payload()
+    setup_state = load_json(CONFIG_PATH, {})
+    secret_keys = set(setup_state.get("secret_keys", [])) if isinstance(setup_state, dict) else set()
+    modules_by_name = {
+        item.get("name"): item for item in status_payload.get("modules", []) if isinstance(item, dict)
+    }
+    telegram_result = modules_by_name.get("spark-telegram-bot")
+    pids = status_payload.get("tracked_pids") if isinstance(status_payload.get("tracked_pids"), dict) else {}
+    telegram_pid = pids.get("spark-telegram-bot") if isinstance(pids, dict) else None
+
+    env_values = read_generated_env(MODULE_CONFIG_DIR / "spark-telegram-bot.env")
+    llm_state = status_payload.get("llm") if isinstance(status_payload.get("llm"), dict) else {}
+    llm_hints = build_llm_repair_hints(llm_state) if llm_state else [
+        "No LLM provider is configured. Run `spark setup` to choose chat, builder, memory, and mission providers."
+    ]
+
+    checks: list[dict[str, Any]] = []
+    checks.append(
+        {
+            "name": "starter_installed",
+            "ok": bool(status_payload.get("modules")),
+            "detail": "Spark starter modules are installed." if status_payload.get("modules") else "No installed Spark modules recorded.",
+            "repair": "spark setup telegram-starter",
+        }
+    )
+    checks.append(
+        {
+            "name": "telegram_module_health",
+            "ok": bool(telegram_result and telegram_result.get("healthy") is True),
+            "detail": telegram_result.get("detail") if telegram_result else "spark-telegram-bot is not installed.",
+            "repair": "spark status",
+        }
+    )
+    checks.append(
+        {
+            "name": "bot_token",
+            "ok": "telegram.bot_token" in secret_keys,
+            "detail": "Telegram bot token is configured." if "telegram.bot_token" in secret_keys else "Telegram bot token is missing.",
+            "repair": "spark setup --bot-token <BOTFATHER_TOKEN>",
+        }
+    )
+    checks.append(
+        {
+            "name": "admin_allowlist",
+            "ok": "telegram.admin_ids" in secret_keys,
+            "detail": "Telegram admin allowlist is configured." if "telegram.admin_ids" in secret_keys else "Telegram admin ids are missing.",
+            "repair": "Send /myid to the bot, then rerun `spark setup --admin-telegram-ids <id>`.",
+        }
+    )
+    bridge_mode = env_values.get("SPARK_BUILDER_BRIDGE_MODE")
+    checks.append(
+        {
+            "name": "builder_bridge",
+            "ok": bridge_mode == "required" and bool(env_values.get("SPARK_BUILDER_HOME")),
+            "detail": "Telegram is configured to require the Builder bridge." if bridge_mode == "required" else "Telegram is not configured to require the Builder bridge.",
+            "repair": "spark setup telegram-starter",
+        }
+    )
+    checks.append(
+        {
+            "name": "llm_roles",
+            "ok": not llm_hints,
+            "detail": "All Spark LLM roles have configured auth." if not llm_hints else "One or more Spark LLM roles are not ready.",
+            "repair": " ".join(llm_hints) if llm_hints else "",
+        }
+    )
+    process_running = False
+    if isinstance(telegram_pid, dict):
+        process_running = pid_is_running(int(telegram_pid.get("pid", 0)))
+    checks.append(
+        {
+            "name": "telegram_process",
+            "ok": process_running,
+            "detail": f"spark-telegram-bot is running (pid {telegram_pid.get('pid')})." if process_running and isinstance(telegram_pid, dict) else "spark-telegram-bot is not running under Spark supervision.",
+            "repair": "spark restart telegram-starter",
+        }
+    )
+
+    ok = all(bool(check["ok"]) for check in checks)
+    return {
+        "ok": ok,
+        "summary": "Spark Telegram repair",
+        "checks": checks,
+        "status_repair_hints": status_payload.get("repair_hints", []),
+        "next_commands": [
+            "spark status",
+            "spark restart telegram-starter",
+            "spark logs spark-telegram-bot --lines 80",
+            "spark setup telegram-starter",
+        ],
+    }
+
+
+def cmd_fix(args: argparse.Namespace) -> int:
+    if args.target != "telegram":
+        raise SystemExit(f"Unknown fix target: {args.target}")
+    payload = collect_telegram_fix_payload()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0 if payload.get("ok") else 1
+    print(payload["summary"])
+    print("")
+    for check in payload["checks"]:
+        marker = "[OK]" if check["ok"] else "[FIX]"
+        print(f"{marker} {check['name']}: {check['detail']}")
+        if not check["ok"] and check.get("repair"):
+            print(f"      {check['repair']}")
+    if payload.get("status_repair_hints"):
+        print("")
+        print("Status repair hints:")
+        for hint in payload["status_repair_hints"]:
+            print(f"  - {hint}")
+    print("")
+    print("Useful commands:")
+    for command in payload["next_commands"]:
+        print(f"  {command}")
+    return 0 if payload.get("ok") else 1
+
+
+def provider_catalog_payload() -> dict[str, Any]:
+    codex = detect_codex_cli()
+    claude = detect_claude_code()
+    return {
+        "providers": [
+            {
+                "id": "openai",
+                "label": "OpenAI",
+                "auth": ["codex_oauth", "api_key"],
+                "oauth_available": bool(codex["present"]),
+                "recommended_for": ["chat", "builder", "mission"],
+                "setup": "spark setup --llm-provider openai",
+            },
+            {
+                "id": "codex",
+                "label": "Codex CLI",
+                "auth": ["codex_oauth"],
+                "oauth_available": bool(codex["present"]),
+                "recommended_for": ["chat", "builder", "mission"],
+                "setup": "spark setup --llm-provider codex",
+            },
+            {
+                "id": "anthropic",
+                "label": "Anthropic",
+                "auth": ["claude_oauth", "api_key"],
+                "oauth_available": bool(claude["present"]),
+                "recommended_for": ["chat", "builder"],
+                "setup": "spark setup --llm-provider anthropic",
+            },
+            {
+                "id": "zai",
+                "label": "Z.AI / GLM",
+                "auth": ["api_key"],
+                "oauth_available": False,
+                "recommended_for": ["chat", "builder", "mission"],
+                "setup": "spark setup --llm-provider zai --zai-api-key <key>",
+            },
+            {
+                "id": "ollama",
+                "label": "Ollama",
+                "auth": ["local"],
+                "oauth_available": False,
+                "recommended_for": ["memory", "local/private"],
+                "setup": "spark setup --llm-provider ollama --ollama-model <model>",
+            },
+        ],
+        "roles": list(LLM_ROLES),
+    }
+
+
+def provider_status_payload() -> dict[str, Any]:
+    setup_state = load_json(CONFIG_PATH, {})
+    llm_state = setup_state.get("llm") if isinstance(setup_state, dict) else None
+    if not isinstance(llm_state, dict):
+        return {
+            "ok": False,
+            "configured": False,
+            "summary": "No LLM provider is configured.",
+            "roles": {},
+            "repair_hints": ["Run `spark setup --llm-provider openai` or `spark setup --llm-provider codex` to choose a provider."],
+        }
+    roles = llm_state.get("roles")
+    if not isinstance(roles, dict):
+        roles = {role: llm_state for role in LLM_ROLES}
+    role_payload: dict[str, Any] = {}
+    for role in LLM_ROLES:
+        state = roles.get(role, {})
+        if not isinstance(state, dict):
+            state = {}
+        provider = str(state.get("provider") or llm_state.get("provider") or "not_configured")
+        auth_mode = str(state.get("auth_mode") or llm_state.get("auth_mode") or "not_configured")
+        role_payload[role] = {
+            "provider": provider,
+            "bot_provider": state.get("bot_provider") or LLM_PROVIDER_ENV.get(provider, {}).get("bot_provider"),
+            "model": state.get("model") or llm_state.get("model") or "",
+            "auth_mode": auth_mode,
+            "ready": provider != "not_configured" and auth_mode != "not_configured",
+        }
+    repair_hints = build_llm_repair_hints({"provider": llm_state.get("provider"), "roles": role_payload})
+    return {
+        "ok": not repair_hints,
+        "configured": bool(llm_state.get("provider") and llm_state.get("provider") != "not_configured"),
+        "summary": "Spark LLM provider roles",
+        "roles": role_payload,
+        "repair_hints": repair_hints,
+    }
+
+
+def cmd_providers(args: argparse.Namespace) -> int:
+    if args.providers_command == "list":
+        payload = provider_catalog_payload()
+        if args.json:
+            print(json.dumps(payload, indent=2))
+            return 0
+        print("Spark LLM providers")
+        for provider in payload["providers"]:
+            auth = ", ".join(provider["auth"])
+            oauth = "available" if provider["oauth_available"] else "not detected"
+            print(f"{provider['id']:<10} {provider['label']:<16} auth={auth}; oauth={oauth}")
+            print(f"           setup: {provider['setup']}")
+        return 0
+    if args.providers_command == "status":
+        payload = provider_status_payload()
+        if args.json:
+            print(json.dumps(payload, indent=2))
+            return 0 if payload["ok"] else 1
+        print(payload["summary"])
+        for role in LLM_ROLES:
+            state = payload["roles"].get(role, {})
+            marker = "[OK]" if state.get("ready") else "[FIX]"
+            print(
+                f"{marker} {role:<7} provider={state.get('provider', 'not_configured')} "
+                f"model={state.get('model') or 'not configured'} auth={state.get('auth_mode', 'not_configured')}"
+            )
+        for hint in payload["repair_hints"]:
+            print(f"Repair: {hint}")
+        return 0 if payload["ok"] else 1
+    raise SystemExit(f"Unknown providers command: {args.providers_command}")
+
+
+def collect_verify_payload() -> dict[str, Any]:
+    status_payload = collect_status_payload()
+    provider_payload = provider_status_payload()
+    setup_state = load_json(CONFIG_PATH, {})
+    installed = load_json(REGISTRY_PATH, {})
+    secret_keys = set(setup_state.get("secret_keys", [])) if isinstance(setup_state, dict) else set()
+    bundle_name = str(setup_state.get("bundle") or "telegram-starter") if isinstance(setup_state, dict) else "telegram-starter"
+    try:
+        expected_modules = resolve_bundle_names(bundle_name)
+    except SystemExit:
+        expected_modules = []
+
+    installed_names = set(installed) if isinstance(installed, dict) else set()
+    status_modules = status_payload.get("modules") if isinstance(status_payload.get("modules"), list) else []
+    unhealthy = [
+        str(item.get("name"))
+        for item in status_modules
+        if isinstance(item, dict) and item.get("healthy") is False
+    ]
+    checked = [
+        str(item.get("name"))
+        for item in status_modules
+        if isinstance(item, dict) and item.get("healthy") is not None
+    ]
+
+    gateway_env = read_generated_env(MODULE_CONFIG_DIR / "spark-telegram-bot.env")
+    builder_env = read_generated_env(MODULE_CONFIG_DIR / "spark-intelligence-builder.env")
+    spawner_env = read_generated_env(MODULE_CONFIG_DIR / "spawner-ui.env")
+    pids = status_payload.get("tracked_pids") if isinstance(status_payload.get("tracked_pids"), dict) else {}
+
+    def running(module_name: str) -> bool:
+        record = pids.get(module_name) if isinstance(pids, dict) else None
+        if not isinstance(record, dict):
+            return False
+        try:
+            return pid_is_running(int(record.get("pid", 0)))
+        except (TypeError, ValueError):
+            return False
+
+    checks: list[dict[str, Any]] = []
+
+    missing_modules = [name for name in expected_modules if name not in installed_names]
+    checks.append(
+        {
+            "name": "starter_bundle",
+            "ok": bool(expected_modules) and not missing_modules,
+            "required": True,
+            "detail": (
+                f"{bundle_name} has all {len(expected_modules)} expected modules installed."
+                if expected_modules and not missing_modules
+                else f"{bundle_name} is missing: {', '.join(missing_modules) or 'bundle definition unavailable'}."
+            ),
+            "repair": f"spark setup {bundle_name}",
+        }
+    )
+
+    checks.append(
+        {
+            "name": "module_health",
+            "ok": bool(checked) and not unhealthy,
+            "required": True,
+            "detail": (
+                f"{len(checked)} module healthchecks passed."
+                if checked and not unhealthy
+                else f"Unhealthy modules: {', '.join(unhealthy) or 'no healthchecks completed'}."
+            ),
+            "repair": "spark status",
+        }
+    )
+
+    checks.append(
+        {
+            "name": "llm_roles",
+            "ok": bool(provider_payload.get("ok")),
+            "required": True,
+            "detail": "Chat, builder, memory, and mission LLM roles are ready." if provider_payload.get("ok") else "One or more LLM roles are not ready.",
+            "repair": "spark providers status",
+        }
+    )
+
+    gateway_webhook_keys = [key for key, value in gateway_env.items() if "WEBHOOK" in key and value]
+    telegram_security_ok = (
+        "telegram.bot_token" in secret_keys
+        and "telegram.admin_ids" in secret_keys
+        and gateway_env.get("TELEGRAM_GATEWAY_MODE") == "polling"
+        and not gateway_webhook_keys
+        and "BOT_TOKEN" not in gateway_env
+    )
+    checks.append(
+        {
+            "name": "telegram_long_polling_security",
+            "ok": telegram_security_ok,
+            "required": True,
+            "detail": (
+                "Telegram uses long polling, has token/admin secrets recorded, and generated config does not expose BOT_TOKEN."
+                if telegram_security_ok
+                else "Telegram token/admin setup, long-polling mode, or generated secret hygiene needs repair."
+            ),
+            "repair": "spark setup telegram-starter",
+        }
+    )
+
+    if isinstance(setup_state, dict):
+        builder_home = gateway_env.get("SPARK_BUILDER_HOME") or str(setup_state.get("builder_home", ""))
+    else:
+        builder_home = ""
+    builder_bridge_ok = (
+        gateway_env.get("SPARK_BUILDER_BRIDGE_MODE") == "required"
+        and bool(builder_home)
+        and bool(builder_env.get("SPARK_INTELLIGENCE_HOME"))
+        and bool(builder_env.get("SPARK_DOMAIN_CHIP_MEMORY_ROOT"))
+        and bool(builder_env.get("SPARK_RESEARCHER_ROOT"))
+    )
+    checks.append(
+        {
+            "name": "builder_memory_bridge",
+            "ok": builder_bridge_ok,
+            "required": True,
+            "detail": (
+                "Telegram requires Builder, and Builder has memory plus Researcher roots."
+                if builder_bridge_ok
+                else "Builder bridge, domain-chip-memory root, or spark-researcher root is not wired."
+            ),
+            "repair": "spark setup telegram-starter",
+        }
+    )
+
+    mission_provider = spawner_env.get("DEFAULT_MISSION_PROVIDER") or spawner_env.get("SPARK_MISSION_LLM_BOT_PROVIDER")
+    spawner_ok = (
+        bool(spawner_env.get("MISSION_CONTROL_WEBHOOK_URLS"))
+        and bool(spawner_env.get("TELEGRAM_RELAY_SECRET"))
+        and bool(mission_provider)
+        and mission_provider not in {"none", "not_configured"}
+    )
+    checks.append(
+        {
+            "name": "spawner_mission_relay",
+            "ok": spawner_ok,
+            "required": True,
+            "detail": (
+                f"Spawner mission relay is configured with provider {mission_provider}."
+                if spawner_ok
+                else "Spawner mission relay or mission LLM provider is not ready."
+            ),
+            "repair": "spark setup --mission-llm-provider openai",
+        }
+    )
+
+    process_ok = running("spark-telegram-bot") and running("spawner-ui")
+    checks.append(
+        {
+            "name": "runtime_processes",
+            "ok": process_ok,
+            "required": True,
+            "detail": "Telegram bot and Spawner UI are running under Spark supervision." if process_ok else "Telegram bot and/or Spawner UI are not running under Spark supervision.",
+            "repair": "spark start telegram-starter",
+        }
+    )
+
+    required_ok = all(bool(check["ok"]) for check in checks if check.get("required", True))
+    return {
+        "ok": required_ok,
+        "summary": "Spark launch verification",
+        "bundle": bundle_name,
+        "checks": checks,
+        "provider_status": provider_payload,
+        "status_repair_hints": status_payload.get("repair_hints", []),
+        "next_commands": [
+            "spark status",
+            "spark providers status",
+            "spark fix telegram",
+            "spark start telegram-starter",
+            "spark logs spark-telegram-bot --lines 80",
+            "spark logs spawner-ui --lines 80",
+        ],
+    }
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    payload = collect_verify_payload()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+    print(payload["summary"])
+    print(f"Bundle: {payload['bundle']}")
+    print("")
+    for check in payload["checks"]:
+        marker = "[OK]" if check["ok"] else "[FIX]"
+        print(f"{marker} {check['name']}: {check['detail']}")
+        if not check["ok"] and check.get("repair"):
+            print(f"      {check['repair']}")
+    if payload.get("status_repair_hints"):
+        print("")
+        print("Status repair hints:")
+        for hint in payload["status_repair_hints"]:
+            print(f"  - {hint}")
+    print("")
+    print("Useful commands:")
+    for command in payload["next_commands"]:
+        print(f"  {command}")
+    return 0 if payload["ok"] else 1
 
 
 def resolve_installed_target_modules(target: str | None) -> list[Module]:
@@ -3263,6 +3823,8 @@ def onboarding_guide_payload() -> dict[str, Any]:
         ],
         "operator_commands": [
             { "command": "spark status", "use": "Human-readable health check and repair hints." },
+            { "command": "spark verify", "use": "Launch-readiness proof for modules, LLM roles, Telegram long polling, Builder memory, Spawner relay, and running processes." },
+            { "command": "spark fix telegram", "use": "Targeted quiet-bot repair checklist: token, admin ids, Builder bridge, LLM roles, process, and logs." },
             { "command": "spark doctor --json", "use": "Structured diagnostics for agents and support." },
             { "command": "spark autostart install --now", "use": "Turn on the Telegram agent now and every time this computer logs in." },
             { "command": "spark autostart status", "use": "Check whether login autostart is installed." },
@@ -3273,8 +3835,10 @@ def onboarding_guide_payload() -> dict[str, Any]:
         ],
         "troubleshooting": [
             "Bot receives no messages: make sure only one polling process is running, then restart spark-telegram-bot.",
+            "Bot is quiet and you are not sure why: run spark fix telegram.",
             "Bot says admin only: send /myid, add that numeric id during spark setup, then restart.",
             "LLM does not answer: rerun spark setup with providers for chat, builder, memory, and mission, then run spark status.",
+            "Fresh install feels incomplete: run spark verify and follow the first [FIX] line.",
             "/run fails: start spawner-ui and check spark logs spawner-ui.",
             "Memory does not work: run spark status and repair Builder/domain-chip-memory hints first.",
         ],
@@ -3361,11 +3925,11 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--admin-telegram-ids")
     setup_parser.add_argument("--telegram-relay-secret")
     setup_parser.add_argument("--spawner-ui-url", default="http://127.0.0.1:5173")
-    setup_parser.add_argument("--llm-provider", choices=sorted(LLM_PROVIDER_ENV), help="Default provider for all Spark LLM roles unless a role-specific provider is set")
-    setup_parser.add_argument("--chat-llm-provider", choices=sorted(LLM_PROVIDER_ENV), help="Provider for Telegram chat replies")
-    setup_parser.add_argument("--builder-llm-provider", choices=sorted(LLM_PROVIDER_ENV), help="Provider for Builder reasoning and orchestration")
-    setup_parser.add_argument("--memory-llm-provider", choices=sorted(LLM_PROVIDER_ENV), help="Provider for memory synthesis and recall")
-    setup_parser.add_argument("--mission-llm-provider", choices=sorted(LLM_PROVIDER_ENV), help="Provider for Spawner missions and coding/build work")
+    setup_parser.add_argument("--llm-provider", choices=LLM_PROVIDER_CHOICES, help="Default provider for all Spark LLM roles unless a role-specific provider is set")
+    setup_parser.add_argument("--chat-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for Telegram chat replies")
+    setup_parser.add_argument("--builder-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for Builder reasoning and orchestration")
+    setup_parser.add_argument("--memory-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for memory synthesis and recall")
+    setup_parser.add_argument("--mission-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for Spawner missions and coding/build work")
     setup_parser.add_argument("--zai-api-key", help="Z.AI / GLM coding endpoint API key")
     setup_parser.add_argument("--zai-base-url", default="https://api.z.ai/api/coding/paas/v4/")
     setup_parser.add_argument("--zai-model", default="glm-5.1")
@@ -3387,6 +3951,24 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="Run diagnostic status and emit structured output")
     doctor_parser.add_argument("--json", action="store_true")
     doctor_parser.set_defaults(func=cmd_doctor)
+
+    verify_parser = subparsers.add_parser("verify", help="Verify launch-critical Spark wiring end to end")
+    verify_parser.add_argument("--json", action="store_true")
+    verify_parser.set_defaults(func=cmd_verify)
+
+    fix_parser = subparsers.add_parser("fix", help="Run targeted repair guidance for common Spark issues")
+    fix_parser.add_argument("target", nargs="?", choices=["telegram"], default="telegram")
+    fix_parser.add_argument("--json", action="store_true")
+    fix_parser.set_defaults(func=cmd_fix)
+
+    providers_parser = subparsers.add_parser("providers", help="Inspect Spark LLM provider choices and role wiring")
+    providers_sub = providers_parser.add_subparsers(dest="providers_command", required=True)
+    providers_list_parser = providers_sub.add_parser("list", help="List supported LLM providers and setup paths")
+    providers_list_parser.add_argument("--json", action="store_true")
+    providers_list_parser.set_defaults(func=cmd_providers)
+    providers_status_parser = providers_sub.add_parser("status", help="Show chat/build/memory/mission provider readiness")
+    providers_status_parser.add_argument("--json", action="store_true")
+    providers_status_parser.set_defaults(func=cmd_providers)
 
     update_parser = subparsers.add_parser("update", help="Refresh installed modules from their current source paths")
     update_parser.add_argument("target", nargs="?")

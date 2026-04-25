@@ -103,7 +103,9 @@ bash ./install.sh \
   --setup-arg "$TELEGRAM_ADMIN_IDS"
 ```
 
-To wire LLMs during setup, pick either one default provider or role-specific providers. Spark supports the same onboarding shape on Windows, macOS, Linux, and WSL:
+That command installs and wires the starter stack, but it intentionally does not invent an LLM provider. If no provider is chosen, `spark status` and `spark fix telegram` report the LLM roles as not configured instead of silently falling back to a local model.
+
+To wire LLMs during setup, run interactive `spark setup` and choose a provider from the prompt, or pass one default provider / role-specific providers in the command. Spark supports the same onboarding shape on Windows, macOS, Linux, and WSL:
 
 ```bash
 bash ./install.sh \
@@ -136,6 +138,29 @@ spark setup \
 ```
 
 `--llm-provider` remains the simple default for all roles. The role-specific flags override it when you want, for example, a local model for memory and a stronger cloud model for Builder or mission work.
+
+If the Telegram bot is quiet after install, run the targeted repair checklist:
+
+```bash
+spark fix telegram
+```
+
+It checks the starter install, Telegram module health, BotFather token, admin allowlist, Builder bridge, LLM roles, supervised process state, and the next log/status commands to run.
+
+For a fuller launch-readiness proof, run:
+
+```bash
+spark verify
+```
+
+It checks the five-module starter bundle, module healthchecks, LLM roles, Telegram long-polling/security, Builder memory + Researcher wiring, Spawner mission relay, and whether the Telegram bot plus Spawner UI are actually running.
+
+To inspect only LLM choices and role readiness:
+
+```bash
+spark providers list
+spark providers status
+```
 
 ## Default Starter Bundle
 
@@ -173,6 +198,9 @@ For a fresh user, the intended path is:
 ```bash
 spark guide
 spark status
+spark verify
+spark fix telegram
+spark providers status
 spark autostart install --now
 ```
 
@@ -192,6 +220,8 @@ Useful Telegram checks:
 - `/remember my preferred Spark reply style is concise but warm` should return a short saved confirmation, not an internal `Working Memory` heading.
 - `/run <goal>` sends a mission to Spawner UI.
 
+If the bot does not reply, run `spark fix telegram` first. It is the fastest path to tell whether the issue is token/admin setup, LLM provider setup, Builder bridge wiring, or the local process not running.
+
 ## Agent Operating Guide
 
 If you are an LLM agent installing Spark for a user:
@@ -199,11 +229,13 @@ If you are an LLM agent installing Spark for a user:
 1. Prefer the official site/script path the user gives you, or clone `spark-cli` directly if developing locally.
 2. Run `spark setup` first; do not install the five core repos one by one unless debugging.
 3. Use `spark status --json` before declaring the install healthy, and check that the LLM role summary matches the user's intended chat, builder, memory, and mission providers.
-4. Never print or commit bot tokens, provider API keys, `.env`, `.env.*`, or `~/.spark/config/secrets.local.json`.
-5. Confirm Telegram's generated env points at Builder with `SPARK_BUILDER_HOME`, and confirm Builder has memory enabled with `domain-chip-memory` active.
-6. If `/remember` replies with `Working Memory`, generic memory text, or a false success while recall fails, rerun `spark setup`, restart `spark-telegram-bot`, then inspect Builder memory state before editing bot code. The launch starter should fail visibly if Builder is unreachable, not silently fall back.
-7. If a module fails healthcheck, read `spark status` repair hints before editing code.
-8. Do not add the deferred dashboard/port `8787` path back into launch onboarding.
+4. Run `spark verify` before declaring the install launch-ready.
+5. If the bot is quiet, run `spark fix telegram` before editing code.
+6. Never print or commit bot tokens, provider API keys, `.env`, `.env.*`, or `~/.spark/config/secrets.local.json`.
+7. Confirm Telegram's generated env points at Builder with `SPARK_BUILDER_HOME`, and confirm Builder has memory enabled with `domain-chip-memory` active.
+8. If `/remember` replies with `Working Memory`, generic memory text, or a false success while recall fails, rerun `spark setup`, restart `spark-telegram-bot`, then inspect Builder memory state before editing bot code. The launch starter should fail visibly if Builder is unreachable, not silently fall back.
+9. If a module fails healthcheck, read `spark status` repair hints before editing code.
+10. Do not add the deferred dashboard/port `8787` path back into launch onboarding.
 
 ## Commands
 

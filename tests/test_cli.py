@@ -21,6 +21,8 @@ from spark_cli.cli import (
     command_with_managed_python,
     collect_secret_requirements,
     collect_secret_values,
+    collect_telegram_fix_payload,
+    collect_verify_payload,
     cmd_setup,
     CONFIG_PATH,
     detect_runtime_binary,
@@ -68,6 +70,7 @@ from spark_cli.cli import (
     needs_capabilities,
     parse_version_constraint,
     parse_version_tuple,
+    provider_status_payload,
     runtime_version_satisfies,
     validate_capability_needs_for_install,
     validate_manifest_schema,
@@ -94,6 +97,7 @@ from spark_cli.cli import (
     read_generated_env,
     required_runtimes_for_modules,
     resolve_runtime_binary,
+    run_llm_provider_wizard,
     run_setup_wizard,
     shell_command_env,
     setup_is_interactive,
@@ -1315,14 +1319,14 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(envs["spawner-ui"]["MISSION_CONTROL_WEBHOOK_URLS"], "http://127.0.0.1:8788/spawner-events")
         self.assertIn("TELEGRAM_RELAY_SECRET", envs["spark-telegram-bot"])
         self.assertEqual(envs["spark-telegram-bot"]["TELEGRAM_RELAY_SECRET"], envs["spawner-ui"]["TELEGRAM_RELAY_SECRET"])
-        self.assertEqual(envs["spark-telegram-bot"]["LLM_PROVIDER"], "ollama")
-        self.assertEqual(envs["spark-telegram-bot"]["BOT_DEFAULT_PROVIDER"], "ollama")
-        self.assertEqual(envs["spark-telegram-bot"]["OLLAMA_URL"], "http://localhost:11434")
-        self.assertEqual(envs["spark-telegram-bot"]["SPARK_CHAT_LLM_PROVIDER"], "ollama")
-        self.assertEqual(envs["spark-telegram-bot"]["SPARK_BUILDER_LLM_PROVIDER"], "ollama")
-        self.assertEqual(envs["spark-telegram-bot"]["SPARK_MEMORY_LLM_PROVIDER"], "ollama")
-        self.assertEqual(envs["spark-telegram-bot"]["SPARK_MISSION_LLM_PROVIDER"], "ollama")
-        self.assertEqual(envs["spark-intelligence-builder"]["SPARK_LLM_PROVIDER"], "ollama")
+        self.assertEqual(envs["spark-telegram-bot"]["LLM_PROVIDER"], "not_configured")
+        self.assertEqual(envs["spark-telegram-bot"]["BOT_DEFAULT_PROVIDER"], "none")
+        self.assertNotIn("OLLAMA_URL", envs["spark-telegram-bot"])
+        self.assertEqual(envs["spark-telegram-bot"]["SPARK_CHAT_LLM_PROVIDER"], "not_configured")
+        self.assertEqual(envs["spark-telegram-bot"]["SPARK_BUILDER_LLM_PROVIDER"], "not_configured")
+        self.assertEqual(envs["spark-telegram-bot"]["SPARK_MEMORY_LLM_PROVIDER"], "not_configured")
+        self.assertEqual(envs["spark-telegram-bot"]["SPARK_MISSION_LLM_PROVIDER"], "not_configured")
+        self.assertEqual(envs["spark-intelligence-builder"]["SPARK_LLM_PROVIDER"], "not_configured")
         self.assertNotIn("SPARK_SPARK_LLM_PROVIDER", envs["spark-intelligence-builder"])
 
     def test_build_module_envs_wires_zai_gateway_configuration(self) -> None:
@@ -1879,6 +1883,38 @@ class SparkCliTests(unittest.TestCase):
             collected = run_setup_wizard({}, requirements)
         self.assertEqual(collected["telegram.bot_token"], "finally-a-value")
 
+    def test_run_llm_provider_wizard_selects_zai_and_collects_key(self) -> None:
+        class Args:
+            llm_provider = None
+            chat_llm_provider = None
+            builder_llm_provider = None
+            memory_llm_provider = None
+            mission_llm_provider = None
+
+        args = Args()
+        with patch("builtins.input", return_value="zai"), \
+             patch("spark_cli.cli.getpass.getpass", return_value="zai-test-key"):
+            values = run_llm_provider_wizard(args, {})
+        self.assertEqual(args.llm_provider, "zai")
+        self.assertEqual(values["llm.zai.api_key"], "zai-test-key")
+
+    def test_run_llm_provider_wizard_defaults_to_openai_codex_oauth(self) -> None:
+        class Args:
+            llm_provider = None
+            chat_llm_provider = None
+            builder_llm_provider = None
+            memory_llm_provider = None
+            mission_llm_provider = None
+
+        args = Args()
+        with patch("builtins.input", return_value=""), \
+             patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
+             patch("spark_cli.cli.getpass.getpass") as getpass_mock:
+            values = run_llm_provider_wizard(args, {})
+        self.assertEqual(args.llm_provider, "openai")
+        self.assertEqual(values, {})
+        getpass_mock.assert_not_called()
+
     def test_collect_secret_values_prompts_when_interactive_and_missing(self) -> None:
         module = Module(
             name="spark-telegram-bot",
@@ -2307,7 +2343,7 @@ class SparkCliTests(unittest.TestCase):
             [],
             {"llm": {"provider": "zai", "api_key_configured": False}},
         )
-        self.assertIn("LLM provider `zai` is missing an API key. Re-run `spark setup --llm-provider zai --zai-api-key <key>`.", hints)
+        self.assertIn("LLM provider uses Z.AI but is missing an API key. Re-run `spark setup --llm-provider zai --zai-api-key <key>`.", hints)
 
     def test_build_status_repair_hints_allows_openai_codex_auth(self) -> None:
         hints = build_status_repair_hints(
@@ -2324,9 +2360,221 @@ class SparkCliTests(unittest.TestCase):
             {"llm": {"provider": "openai", "api_key_configured": False, "auth_mode": "not_configured"}},
         )
         self.assertIn(
-            "OpenAI is selected but neither Codex CLI OAuth nor OPENAI_API_KEY is configured. Run `codex` to sign in with ChatGPT, or rerun `spark setup --llm-provider openai --openai-api-key <key>`.",
+            "LLM provider uses OpenAI but neither Codex CLI OAuth nor OPENAI_API_KEY is configured. Run `codex` to sign in with ChatGPT, or rerun `spark setup --llm-provider openai --openai-api-key <key>`.",
             hints,
         )
+
+    def test_build_status_repair_hints_reports_unconfigured_llm_roles(self) -> None:
+        hints = build_status_repair_hints(
+            {},
+            [],
+            {
+                "llm": {
+                    "provider": "not_configured",
+                    "roles": {
+                        "chat": {"provider": "not_configured", "auth_mode": "not_configured"},
+                        "builder": {"provider": "not_configured", "auth_mode": "not_configured"},
+                        "memory": {"provider": "not_configured", "auth_mode": "not_configured"},
+                        "mission": {"provider": "not_configured", "auth_mode": "not_configured"},
+                    },
+                }
+            },
+        )
+        self.assertIn(
+            "No LLM provider is configured. Run `spark setup` to choose chat, builder, memory, and mission providers.",
+            hints,
+        )
+        self.assertIn(
+            "LLM role `chat` is not configured. Run `spark setup --chat-llm-provider openai` to use Codex/OpenAI, or choose anthropic, zai, ollama, or codex.",
+            hints,
+        )
+
+    def test_collect_telegram_fix_payload_flags_quiet_bot_blockers(self) -> None:
+        status_payload = {
+            "ok": False,
+            "modules": [
+                {"name": "spark-telegram-bot", "healthy": False, "detail": "Relay auth: configured"},
+            ],
+            "tracked_pids": {},
+            "llm": {
+                "provider": "not_configured",
+                "roles": {
+                    "chat": {"provider": "not_configured", "auth_mode": "not_configured"},
+                    "builder": {"provider": "not_configured", "auth_mode": "not_configured"},
+                    "memory": {"provider": "not_configured", "auth_mode": "not_configured"},
+                    "mission": {"provider": "not_configured", "auth_mode": "not_configured"},
+                },
+            },
+            "repair_hints": ["No LLM provider is configured."],
+        }
+        with patch("spark_cli.cli.collect_status_payload", return_value=status_payload), \
+            patch("spark_cli.cli.load_json", return_value={"secret_keys": ["telegram.relay_secret"]}), \
+            patch("spark_cli.cli.read_generated_env", return_value={}):
+            payload = collect_telegram_fix_payload()
+        self.assertFalse(payload["ok"])
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(checks["bot_token"]["ok"])
+        self.assertFalse(checks["admin_allowlist"]["ok"])
+        self.assertFalse(checks["llm_roles"]["ok"])
+        self.assertFalse(checks["telegram_process"]["ok"])
+        self.assertIn("spark restart telegram-starter", payload["next_commands"])
+
+    def test_provider_status_payload_reports_role_readiness(self) -> None:
+        setup_state = {
+            "llm": {
+                "provider": "openai",
+                "roles": {
+                    "chat": {"provider": "openai", "model": "gpt-5.5", "auth_mode": "codex_oauth", "bot_provider": "codex"},
+                    "builder": {"provider": "openai", "model": "gpt-5.5", "auth_mode": "codex_oauth", "bot_provider": "codex"},
+                    "memory": {"provider": "ollama", "model": "llama3.1", "auth_mode": "local", "bot_provider": "ollama"},
+                    "mission": {"provider": "not_configured", "model": "", "auth_mode": "not_configured", "bot_provider": "none"},
+                },
+            }
+        }
+        with patch("spark_cli.cli.load_json", return_value=setup_state):
+            payload = provider_status_payload()
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["roles"]["chat"]["ready"])
+        self.assertTrue(payload["roles"]["memory"]["ready"])
+        self.assertFalse(payload["roles"]["mission"]["ready"])
+        self.assertIn(
+            "LLM role `mission` is not configured. Run `spark setup --mission-llm-provider openai` to use Codex/OpenAI, or choose anthropic, zai, ollama, or codex.",
+            payload["repair_hints"],
+        )
+
+    def test_provider_status_payload_accepts_legacy_top_level_auth(self) -> None:
+        setup_state = {
+            "llm": {
+                "provider": "openai",
+                "model": "gpt-5.5",
+                "auth_mode": "codex_oauth",
+            }
+        }
+        with patch("spark_cli.cli.load_json", return_value=setup_state):
+            payload = provider_status_payload()
+        self.assertTrue(payload["ok"])
+        for role in ("chat", "builder", "memory", "mission"):
+            self.assertTrue(payload["roles"][role]["ready"])
+            self.assertEqual(payload["roles"][role]["auth_mode"], "codex_oauth")
+            self.assertEqual(payload["roles"][role]["model"], "gpt-5.5")
+
+    def test_collect_verify_payload_reports_launch_ready_stack(self) -> None:
+        expected = [
+            "spark-researcher",
+            "spark-intelligence-builder",
+            "domain-chip-memory",
+            "spawner-ui",
+            "spark-telegram-bot",
+        ]
+        status_payload = {
+            "ok": True,
+            "modules": [{"name": name, "healthy": True} for name in expected],
+            "tracked_pids": {
+                "spark-telegram-bot": {"pid": 101},
+                "spawner-ui": {"pid": 102},
+            },
+            "repair_hints": [],
+        }
+        provider_payload = {
+            "ok": True,
+            "roles": {
+                role: {"provider": "openai", "auth_mode": "codex_oauth", "ready": True}
+                for role in ("chat", "builder", "memory", "mission")
+            },
+        }
+        setup_state = {
+            "bundle": "telegram-starter",
+            "secret_keys": ["telegram.bot_token", "telegram.admin_ids"],
+            "builder_home": "C:/tmp/spark/state/spark-intelligence",
+        }
+        installed = {name: {"path": f"C:/tmp/spark/modules/{name}"} for name in expected}
+
+        def fake_load_json(path: Path, default: object) -> object:
+            if Path(path).name == "setup.json":
+                return setup_state
+            if Path(path).name == "installed.json":
+                return installed
+            return default
+
+        def fake_read_generated_env(path: Path) -> dict[str, str]:
+            if Path(path).name == "spark-telegram-bot.env":
+                return {
+                    "TELEGRAM_GATEWAY_MODE": "polling",
+                    "SPARK_BUILDER_BRIDGE_MODE": "required",
+                    "SPARK_BUILDER_HOME": "C:/tmp/spark/state/spark-intelligence",
+                }
+            if Path(path).name == "spark-intelligence-builder.env":
+                return {
+                    "SPARK_INTELLIGENCE_HOME": "C:/tmp/spark/state/spark-intelligence",
+                    "SPARK_DOMAIN_CHIP_MEMORY_ROOT": "C:/tmp/spark/modules/domain-chip-memory",
+                    "SPARK_RESEARCHER_ROOT": "C:/tmp/spark/modules/spark-researcher",
+                }
+            if Path(path).name == "spawner-ui.env":
+                return {
+                    "MISSION_CONTROL_WEBHOOK_URLS": "http://127.0.0.1:8788/spawner-events",
+                    "TELEGRAM_RELAY_SECRET": "relay",
+                    "DEFAULT_MISSION_PROVIDER": "codex",
+                }
+            return {}
+
+        with patch("spark_cli.cli.collect_status_payload", return_value=status_payload), \
+            patch("spark_cli.cli.provider_status_payload", return_value=provider_payload), \
+            patch("spark_cli.cli.load_json", side_effect=fake_load_json), \
+            patch("spark_cli.cli.read_generated_env", side_effect=fake_read_generated_env), \
+            patch("spark_cli.cli.resolve_bundle_names", return_value=expected), \
+            patch("spark_cli.cli.pid_is_running", return_value=True):
+            payload = collect_verify_payload()
+        self.assertTrue(payload["ok"])
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertTrue(checks["starter_bundle"]["ok"])
+        self.assertTrue(checks["telegram_long_polling_security"]["ok"])
+        self.assertTrue(checks["builder_memory_bridge"]["ok"])
+        self.assertTrue(checks["spawner_mission_relay"]["ok"])
+        self.assertTrue(checks["runtime_processes"]["ok"])
+
+    def test_collect_verify_payload_flags_missing_mission_provider_and_webhook(self) -> None:
+        expected = ["spark-researcher", "spark-intelligence-builder", "domain-chip-memory", "spawner-ui", "spark-telegram-bot"]
+        status_payload = {
+            "ok": False,
+            "modules": [{"name": name, "healthy": True} for name in expected],
+            "tracked_pids": {},
+            "repair_hints": ["No LLM provider is configured."],
+        }
+        provider_payload = {"ok": False, "roles": {}, "repair_hints": ["configure providers"]}
+        setup_state = {"bundle": "telegram-starter", "secret_keys": ["telegram.admin_ids"]}
+        installed = {name: {"path": f"C:/tmp/spark/modules/{name}"} for name in expected}
+
+        def fake_load_json(path: Path, default: object) -> object:
+            if Path(path).name == "setup.json":
+                return setup_state
+            if Path(path).name == "installed.json":
+                return installed
+            return default
+
+        def fake_read_generated_env(path: Path) -> dict[str, str]:
+            if Path(path).name == "spark-telegram-bot.env":
+                return {
+                    "BOT_TOKEN": "should-not-be-here",
+                    "TELEGRAM_GATEWAY_MODE": "webhook",
+                    "TELEGRAM_WEBHOOK_URL": "https://example.test/hook",
+                }
+            if Path(path).name == "spawner-ui.env":
+                return {"MISSION_CONTROL_WEBHOOK_URLS": "http://127.0.0.1:8788/spawner-events"}
+            return {}
+
+        with patch("spark_cli.cli.collect_status_payload", return_value=status_payload), \
+            patch("spark_cli.cli.provider_status_payload", return_value=provider_payload), \
+            patch("spark_cli.cli.load_json", side_effect=fake_load_json), \
+            patch("spark_cli.cli.read_generated_env", side_effect=fake_read_generated_env), \
+            patch("spark_cli.cli.resolve_bundle_names", return_value=expected):
+            payload = collect_verify_payload()
+        self.assertFalse(payload["ok"])
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(checks["llm_roles"]["ok"])
+        self.assertFalse(checks["telegram_long_polling_security"]["ok"])
+        self.assertFalse(checks["builder_memory_bridge"]["ok"])
+        self.assertFalse(checks["spawner_mission_relay"]["ok"])
+        self.assertFalse(checks["runtime_processes"]["ok"])
 
     def test_update_setup_state_after_uninstall_clears_empty_setup(self) -> None:
         original = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else None
