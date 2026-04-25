@@ -3272,6 +3272,19 @@ def resolve_stop_module_names(target: str | None, installed_modules: dict[str, M
     return ordered_names + sorted(extra_names)
 
 
+def resolve_restart_modules(target: str | None, installed_modules: dict[str, Module], tracked_pids: dict[str, Any]) -> list[Module]:
+    requested_names = expand_targets(target, installed_modules, include_all=True)
+    restart_names = set(requested_names)
+    restart_names.update(name for name in resolve_stop_module_names(target, installed_modules, tracked_pids) if name in installed_modules)
+
+    start_names: set[str] = set()
+    for name in restart_names:
+        for module in resolve_start_modules(name, installed_modules):
+            start_names.add(module.name)
+    selected_modules = {name: installed_modules[name] for name in start_names}
+    return topologically_sort_modules(selected_modules)
+
+
 def load_pids() -> dict[str, Any]:
     return load_json(PID_PATH, {})
 
@@ -3526,8 +3539,20 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 
 def cmd_restart(args: argparse.Namespace) -> int:
+    ensure_state_dirs()
+    installed_modules = resolve_installed_modules()
+    if not installed_modules:
+        print("No installed Spark modules recorded. Run `spark setup telegram-starter` first.")
+        return 1
+    restart_modules = resolve_restart_modules(args.target, installed_modules, load_pids())
     stop_code = cmd_stop(args)
-    start_code = cmd_start(args)
+    start_code = 0
+    for module in restart_modules:
+        if not module.run_command:
+            print(f"Skipping {module.name}: no run.default command declared")
+            continue
+        if not start_module(module, allow_boot_warnings=getattr(args, "allow_boot_warnings", False)):
+            start_code = 1
     return start_code or stop_code
 
 

@@ -122,6 +122,7 @@ from spark_cli.cli import (
     windows_service_creationflags,
     resolve_bundle_names,
     resolve_install_target,
+    resolve_restart_modules,
     resolve_start_modules,
     resolve_stop_module_names,
     render_launch_agent_plist,
@@ -1362,6 +1363,37 @@ class SparkCliTests(unittest.TestCase):
             },
         )
         self.assertEqual(order, ["spark-telegram-bot", "spark-intelligence-builder"])
+
+    def test_resolve_restart_modules_starts_dependents_stopped_with_dependency(self) -> None:
+        spawner = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={
+                "module": {"name": "spawner-ui", "version": "0.0.1", "kind": "app", "plane": "execution"},
+                "run": {"default": {"command": "npm run dev"}},
+            },
+        )
+        gateway = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"modules": ["spawner-ui"]},
+                "run": {"default": {"command": "npm run dev"}},
+            },
+        )
+        modules = {gateway.name: gateway, spawner.name: spawner}
+
+        ordered = resolve_restart_modules(
+            "spawner-ui",
+            modules,
+            {
+                gateway.name: {"pid": 100},
+                spawner.name: {"pid": 200},
+            },
+        )
+
+        self.assertEqual([module.name for module in ordered], ["spawner-ui", "spark-telegram-bot"])
 
     def test_collect_secret_requirements_maps_manifest_secret_blocks(self) -> None:
         module = Module(
