@@ -91,6 +91,8 @@ from spark_cli.cli import (
     Module,
     MODULE_CONFIG_DIR,
     REGISTRY_PATH,
+    SPARK_HOME,
+    STATE_DIR,
     capability_providers,
     detect_uninstall_blockers,
     detect_capability_conflicts,
@@ -1441,6 +1443,8 @@ class SparkCliTests(unittest.TestCase):
             envs["spark-telegram-bot"]["TELEGRAM_RELAY_SECRET"],
             envs["spawner-ui"]["TELEGRAM_RELAY_SECRET"],
         )
+        self.assertEqual(envs["spawner-ui"]["SPARK_WORKSPACE_ROOT"], str(SPARK_HOME / "workspaces"))
+        self.assertEqual(envs["spawner-ui"]["SPAWNER_STATE_DIR"], str(STATE_DIR / "spawner-ui"))
         self.assertNotIn("TELEGRAM_WEBHOOK_SECRET", envs["spark-telegram-bot"])
 
     def test_build_module_envs_defaults_missing_spawner_ui_url(self) -> None:

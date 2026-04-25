@@ -1274,6 +1274,8 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
         relay_base = relay_base[:-4] + "8788"
     spawner_env = {
         "MISSION_CONTROL_WEBHOOK_URLS": f"{relay_base}/spawner-events",
+        "SPARK_WORKSPACE_ROOT": str(SPARK_HOME / "workspaces"),
+        "SPAWNER_STATE_DIR": str(STATE_DIR / "spawner-ui"),
     }
     llm_metadata_env = spark_prefixed_metadata_env(llm_env)
     spawner_env.update(llm_metadata_env)
