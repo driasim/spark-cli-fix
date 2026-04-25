@@ -23,6 +23,7 @@ from spark_cli.cli import (
     cmd_setup,
     CONFIG_PATH,
     detect_runtime_binary,
+    evaluate_module_health,
     clone_module_source,
     clone_target_for_module,
     ensure_generated_setup_secrets,
@@ -1326,6 +1327,28 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:5173/api/providers did not become ready within 1s", detail)
         self.assertIn("last error:", detail)
 
+    def test_wait_for_ready_check_stops_when_http_process_exits(self) -> None:
+        module = Module(
+            name="http-target",
+            path=Path("C:/tmp/http-target"),
+            manifest={
+                "module": {"name": "http-target", "version": "0.1.0", "kind": "service", "plane": "execution"},
+                "run": {"default": {"ready_check": "http://127.0.0.1:5173/api/providers"}},
+                "healthcheck": {"timeout_seconds": 60},
+            },
+        )
+
+        class ExitedProcess:
+            def poll(self) -> int:
+                return 127
+
+        with patch("spark_cli.cli.urllib.request.urlopen") as urlopen:
+            ready, detail = wait_for_ready_check(module, process=ExitedProcess())  # type: ignore[arg-type]
+
+        self.assertFalse(ready)
+        self.assertEqual(detail, "process exited with code 127")
+        urlopen.assert_not_called()
+
     def test_wait_for_ready_check_accepts_running_process(self) -> None:
         module = Module(
             name="polling-target",
@@ -1367,6 +1390,25 @@ class SparkCliTests(unittest.TestCase):
 
         self.assertFalse(ready)
         self.assertEqual(detail, "process exited with code 1")
+
+    def test_evaluate_module_health_passes_configured_timeout(self) -> None:
+        module = Module(
+            name="health-target",
+            path=Path("C:/tmp/health-target"),
+            manifest={
+                "module": {"name": "health-target", "version": "0.1.0", "kind": "service", "plane": "execution"},
+                "healthcheck": {"command": "npm run health", "timeout_seconds": 7},
+            },
+        )
+
+        completed = subprocess.CompletedProcess("npm run health", 124, stdout="", stderr="command timed out after 7s")
+        with patch("spark_cli.cli.module_runtime_env", return_value={}), \
+             patch("spark_cli.cli.run_shell", return_value=completed) as run:
+            result = evaluate_module_health(module)
+
+        self.assertFalse(result["healthy"])
+        self.assertEqual(result["detail"], "command timed out after 7s")
+        run.assert_called_once_with("npm run health", module.path, env={}, timeout=7)
 
     def test_format_start_warning_mentions_running_process_and_logs(self) -> None:
         module = Module(
@@ -2057,6 +2099,8 @@ class SparkCliTests(unittest.TestCase):
         script = script_path.read_text(encoding="utf-8")
         self.assertIn('SPARK_PREFIX="${SPARK_PREFIX:-$HOME/.spark}"', script)
         self.assertIn('SPARK_NODE_VERSION="${SPARK_NODE_VERSION:-22.18.0}"', script)
+        self.assertIn("normalize_macos_locale", script)
+        self.assertIn('export LC_ALL="en_US.UTF-8"', script)
         self.assertIn("detect_node_platform", script)
         self.assertIn('Darwin) os_id="darwin"', script)
         self.assertIn('arm64|aarch64) arch_id="arm64"', script)

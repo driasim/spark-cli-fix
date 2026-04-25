@@ -1514,7 +1514,8 @@ def evaluate_module_health(module: Module) -> dict[str, Any]:
             "healthcheck_command": None,
             "failure_hint": None,
         }
-    result = run_shell(command, module.path, env=module_runtime_env(module))
+    timeout_seconds = ready_timeout_seconds(module)
+    result = run_shell(command, module.path, env=module_runtime_env(module), timeout=timeout_seconds)
     detail = summarize_command_output(result)
     failure_hint = str(module.manifest.get("healthcheck", {}).get("failure_hint", "")).strip() or None
     success_hint = str(module.manifest.get("healthcheck", {}).get("success_hint", "")).strip() or None
@@ -1850,17 +1851,29 @@ def persist_keychain_secrets(bundle: list[Module], secret_values: dict[str, str]
     return report
 
 
-def run_shell(command: str, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        cwd=str(cwd),
-        shell=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env or shell_command_env(),
-    )
+def run_shell(
+    command: str,
+    cwd: Path,
+    env: dict[str, str] | None = None,
+    timeout: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            cwd=str(cwd),
+            shell=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env or shell_command_env(),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout if isinstance(error.stdout, str) else ""
+        stderr = error.stderr if isinstance(error.stderr, str) else ""
+        stderr = (stderr + "\n" if stderr else "") + f"command timed out after {timeout}s"
+        return subprocess.CompletedProcess(command, 124, stdout=stdout, stderr=stderr)
 
 
 def quote_managed_python() -> str:
@@ -2150,6 +2163,10 @@ def wait_for_ready_check(module: Module, process: subprocess.Popen[Any] | None =
     deadline = time.time() + timeout_seconds
     last_error = "ready check did not pass before timeout"
     while time.time() < deadline:
+        if process is not None:
+            exit_code = process.poll()
+            if exit_code is not None:
+                return False, f"process exited with code {exit_code}"
         if ready_check.startswith(("http://", "https://")):
             try:
                 with urllib.request.urlopen(ready_check, timeout=2) as response:
@@ -2159,7 +2176,7 @@ def wait_for_ready_check(module: Module, process: subprocess.Popen[Any] | None =
             except (urllib.error.URLError, TimeoutError) as error:
                 last_error = str(error)
         else:
-            result = run_shell(ready_check, module.path, env=module_runtime_env(module))
+            result = run_shell(ready_check, module.path, env=module_runtime_env(module), timeout=timeout_seconds)
             if result.returncode == 0:
                 return True, summarize_command_output(result)
             last_error = summarize_command_output(result)

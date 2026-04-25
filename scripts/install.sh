@@ -79,6 +79,21 @@ log() {
   printf '[spark-install] %s\n' "$*"
 }
 
+normalize_macos_locale() {
+  if [ "$(uname -s)" != "Darwin" ]; then
+    return
+  fi
+  if [ "${LC_ALL:-}" = "C.UTF-8" ]; then
+    export LC_ALL="en_US.UTF-8"
+  fi
+  if [ "${LC_CTYPE:-}" = "C.UTF-8" ]; then
+    export LC_CTYPE="en_US.UTF-8"
+  fi
+  if [ "${LANG:-}" = "C.UTF-8" ]; then
+    export LANG="en_US.UTF-8"
+  fi
+}
+
 normalize_path() {
   python3 - "$1" <<'PY'
 import os, sys
@@ -275,6 +290,7 @@ EOF
 
 main() {
   need_cmd python3
+  normalize_macos_locale
   SPARK_PREFIX="$(normalize_path "$SPARK_PREFIX")"
   if [ -z "$SPARK_NODE_PLATFORM" ]; then
     SPARK_NODE_PLATFORM="$(detect_node_platform)"
