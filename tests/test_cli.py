@@ -957,6 +957,28 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn(["launchctl", "bootstrap", "gui/501", str(plist_path)], commands)
             self.assertIn(["launchctl", "kickstart", "-k", "gui/501/ai.sparkswarm.spark-telegram-agent"], commands)
 
+    def test_autostart_status_macos_reports_launch_agent_for_other_spark_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            plist_path = Path(tmp_dir) / "ai.sparkswarm.spark-telegram-agent.plist"
+            plist_path.write_text(
+                render_launch_agent_plist(
+                    target="telegram-starter",
+                    start_command="/Users/example/.spark/bin/spark start telegram-starter",
+                    stop_command="/Users/example/.spark/bin/spark stop telegram-starter",
+                ),
+                encoding="utf-8",
+            )
+            args = build_parser().parse_args(["autostart", "status"])
+            with patch("spark_cli.cli.sys.platform", "darwin"), \
+                 patch("spark_cli.cli.SPARK_HOME", Path("/tmp/spark-fresh")), \
+                 patch("spark_cli.cli.macos_autostart_path", return_value=plist_path), \
+                 patch("sys.stdout", new_callable=StringIO) as output:
+                self.assertEqual(args.func(args), 0)
+
+            self.assertIn("Installed: yes", output.getvalue())
+            self.assertIn("Current Spark home: no", output.getvalue())
+            self.assertIn("LaunchAgent Spark home: ", output.getvalue())
+
     def test_write_windows_startup_script_writes_user_login_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             startup_script = Path(tmp_dir) / "spark-telegram-agent.cmd"

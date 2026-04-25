@@ -5,6 +5,7 @@ import getpass
 import hashlib
 import json
 import os
+import plistlib
 import re
 import secrets as py_secrets
 import shlex
@@ -3866,7 +3867,24 @@ def cmd_autostart_status(_: argparse.Namespace) -> int:
     if sys.platform == "darwin":
         plist_path = macos_autostart_path()
         print(f"macOS LaunchAgent: {plist_path}")
-        print("Installed: " + ("yes" if plist_path.exists() else "no"))
+        installed = plist_path.exists()
+        print("Installed: " + ("yes" if installed else "no"))
+        if installed:
+            try:
+                with plist_path.open("rb") as handle:
+                    plist = plistlib.load(handle)
+            except (OSError, plistlib.InvalidFileException) as exc:
+                print(f"Current Spark home: unknown (could not read LaunchAgent: {exc})")
+            else:
+                env = plist.get("EnvironmentVariables", {}) if isinstance(plist, dict) else {}
+                configured_home = env.get("SPARK_HOME") if isinstance(env, dict) else None
+                if configured_home:
+                    current_home = str(SPARK_HOME)
+                    if str(Path(str(configured_home)).expanduser()) == current_home:
+                        print("Current Spark home: yes")
+                    else:
+                        print("Current Spark home: no")
+                        print(f"LaunchAgent Spark home: {configured_home}")
         return 0
     if sys.platform == "win32":
         result = run_autostart_helper(["schtasks", "/Query", "/TN", AUTOSTART_WINDOWS_TASK_NAME])
