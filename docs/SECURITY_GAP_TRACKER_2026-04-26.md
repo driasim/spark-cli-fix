@@ -16,7 +16,7 @@ This tracker is the cross-repo source of truth for the April 26 hardening pass. 
 | Generated env linked-path protection | Done | Generated module env writes and cleanup now use the same linked-path guard plus write-boundary checks. |
 | Endpoint audit | Started | See `docs/ENDPOINT_AUDIT_2026-04-26.md`. Builder and Telegram local relay surfaces are documented with current auth posture. |
 | Per-request secret resolution | Checked | Builder Discord/WhatsApp webhook secrets resolve through `ConfigManager.read_env_map()` during request handling. CLI runtime envs resolve secrets at process launch; rotation still needs restart for long-lived child processes. |
-| Approval engine | Planned only | Sensitive-action approval policy is deliberately deferred. Intended scope is high-risk operations such as deletion, force-push, history rewrite, external publish, and credential mutation. |
+| Approval engine | Planned only | Sensitive-action approval policy is deliberately deferred. See `docs/APPROVAL_ENGINE_PLAN_2026-04-26.md` for scope, rollout phases, and test requirements before implementation. |
 | Docker sandbox | Deferred optional | Docker isolation should stay optional and additive. It should not be required for normal local Spark usage. |
 | T11 sustained-attack tier | Deferred | Do not focus implementation now, but keep spark-character structure compatible with adding the tier later. |
 
@@ -40,7 +40,7 @@ Result:
 2. Add real Sigstore or cosign attestation metadata to each blessed module once the report-only verifier has aged safely.
 3. Turn provenance enforcement on gradually: first fail only missing commit pins, then warn on unsigned commits, then require attestations for blessed modules.
 4. Add narrow endpoint regression tests whenever a new HTTP listener or public route is introduced.
-5. Design the approval engine for sensitive actions before touching runtime behavior.
+5. Implement the approval engine only after the report-only classifier plan in `docs/APPROVAL_ENGINE_PLAN_2026-04-26.md` is reviewed.
 
 ## Gitleaks Scan - 2026-04-26
 
