@@ -25,7 +25,9 @@ from spark_cli.cli import (
     collect_secret_requirements,
     collect_secret_values,
     collect_installer_integrity_payload,
+    collect_module_provenance_payload,
     collect_setup_configuration,
+    collect_llm_doctor_context,
     collect_telegram_fix_payload,
     collect_verify_payload,
     configure_telegram_profile,
@@ -104,6 +106,8 @@ from spark_cli.cli import (
     parse_version_constraint,
     parse_version_tuple,
     provider_status_payload,
+    redact_for_llm,
+    redact_sensitive_text,
     read_clipboard_text,
     read_secret_interactive,
     resolve_secret_input,
@@ -143,7 +147,9 @@ from spark_cli.cli import (
     ready_timeout_seconds,
     read_generated_env,
     resolve_llm_roles,
+    resolve_llm_doctor_target,
     required_runtimes_for_modules,
+    render_llm_doctor_prompt,
     resolve_runtime_binary,
     run_llm_provider_wizard,
     run_setup_wizard,
@@ -337,6 +343,18 @@ class SparkCliTests(unittest.TestCase):
             self.assertEqual(load_json(path, {}), {"owned": True})
             self.assertFalse(list(Path(tmp_dir).glob(".state.json.*.tmp")))
 
+    def test_update_env_file_refuses_reparse_point_leaf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env_path = Path(tmp_dir) / ".env"
+            env_path.write_text("KEEP=1\n", encoding="utf-8")
+
+            with patch("spark_cli.cli._path_is_reparse_point", side_effect=lambda item: item == env_path):
+                with self.assertRaises(SystemExit) as error:
+                    update_env_file(env_path, {"BOT_TOKEN": "abc"})
+
+            self.assertIn("linked path", str(error.exception))
+            self.assertEqual(env_path.read_text(encoding="utf-8"), "KEEP=1\n")
+
     def test_telegram_profile_helpers_scope_only_bot_processes(self) -> None:
         self.assertEqual(normalize_telegram_profile(None), "default")
         self.assertEqual(normalize_telegram_profile("Spark-AGI"), "spark-agi")
@@ -360,6 +378,65 @@ class SparkCliTests(unittest.TestCase):
             self.assertEqual(resolve_secret_input(f"@file:{secret_path}"), "secret-from-file")
         finally:
             secret_path.unlink(missing_ok=True)
+
+    def test_llm_doctor_redacts_tokens_and_secret_fields(self) -> None:
+        text = "BOT_TOKEN=1234567890:AAabcdefghijklmnopqrstuvwxyz1234567890 and Authorization: Bearer sk-proj-secretvalue1234567890"
+        redacted = redact_sensitive_text(text)
+        self.assertNotIn("1234567890:AA", redacted)
+        self.assertNotIn("sk-proj-secretvalue", redacted)
+        payload = redact_for_llm(
+            {
+                "api_key": "zai-secret",
+                "nested": {"telegram_bot_token": "1234567890:AAabcdefghijklmnopqrstuvwxyz1234567890"},
+                "safe": "Spawner UI unhealthy",
+            }
+        )
+        self.assertEqual(payload["api_key"], "[REDACTED]")
+        self.assertEqual(payload["nested"]["telegram_bot_token"], "[REDACTED]")
+        self.assertEqual(payload["safe"], "Spawner UI unhealthy")
+
+    def test_collect_llm_doctor_context_defaults_to_no_logs(self) -> None:
+        with patch("spark_cli.cli.collect_status_payload", return_value={"ok": False, "modules": []}), \
+             patch("spark_cli.cli.provider_status_payload", return_value={"ok": True}), \
+             patch("spark_cli.cli.collect_verify_payload", return_value={"ok": False}):
+            context = collect_llm_doctor_context("Telegram is quiet")
+        self.assertEqual(context["problem"], "Telegram is quiet")
+        self.assertFalse(context["safety"]["logs_included"])
+        self.assertNotIn("logs", context)
+
+    def test_llm_doctor_prompt_prefers_spark_repair_commands_over_raw_token_calls(self) -> None:
+        prompt = render_llm_doctor_prompt({"problem": "Telegram is quiet", "status": {"ok": False}})
+        self.assertIn("Do not suggest raw provider API calls that require tokens", prompt)
+        self.assertIn("spark fix telegram", prompt)
+
+    def test_doctor_llm_parser_accepts_problem_and_prompt_out(self) -> None:
+        args = build_parser().parse_args(["doctor", "llm", "Telegram", "is", "quiet", "--prompt-out", "doctor.md"])
+        self.assertEqual(args.doctor_command, "llm")
+        self.assertEqual(args.problem, ["Telegram", "is", "quiet"])
+        self.assertEqual(args.prompt_out, "doctor.md")
+
+    def test_resolve_llm_doctor_target_uses_configured_builder_api_key(self) -> None:
+        setup_state = {
+            "llm": {
+                "provider": "zai",
+                "roles": {
+                    "builder": {
+                        "provider": "zai",
+                        "model": "glm-5.1",
+                        "auth_mode": "api_key",
+                    }
+                },
+            }
+        }
+        args = build_parser().parse_args(["doctor", "llm", "--role", "builder", "broken"])
+        with patch("spark_cli.cli.load_json", return_value=setup_state), \
+             patch("spark_cli.cli.fetch_secret", return_value="zai-key"):
+            target = resolve_llm_doctor_target(args)
+        self.assertEqual(target["provider"], "zai")
+        self.assertEqual(target["role"], "builder")
+        self.assertEqual(target["model"], "glm-5.1")
+        self.assertEqual(target["auth_mode"], "api_key")
+        self.assertNotIn("zai-key", json.dumps(redact_for_llm(target)))
 
     def test_profile_runtime_env_overlays_profile_token_and_env(self) -> None:
         bot = make_module("spark-telegram-bot", ["telegram.ingress"], ["telegram.bot_token", "telegram.relay_secret"])
@@ -1421,6 +1498,43 @@ class SparkCliTests(unittest.TestCase):
                 "bundles": {},
             }
         )
+
+    def test_module_provenance_report_is_non_enforcing_for_future_attestations(self) -> None:
+        registry = {
+            "modules": {
+                "spark-telegram-bot": {
+                    "source": "https://github.com/vibeforge1111/spark-telegram-bot",
+                    "commit": "a" * 40,
+                    "require_signed_commit": False,
+                    "blessed": True,
+                }
+            },
+            "bundles": {},
+        }
+
+        payload = collect_module_provenance_payload(registry=registry)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["mode"], "report_only")
+        self.assertEqual(payload["enforcement"]["attestations"], "report_only")
+        self.assertEqual(payload["checks"][0]["name"], "spark-telegram-bot")
+        self.assertIn("module attestation is not declared yet", payload["checks"][0]["warnings"])
+
+    def test_module_provenance_report_flags_missing_commit_pin(self) -> None:
+        registry = {
+            "modules": {
+                "floating": {
+                    "source": "https://github.com/vibeforge1111/floating",
+                    "blessed": True,
+                }
+            },
+            "bundles": {},
+        }
+
+        payload = collect_module_provenance_payload(registry=registry)
+
+        self.assertFalse(payload["ok"])
+        self.assertIn("module is missing a full commit pin", payload["checks"][0]["warnings"])
 
     def test_autostart_install_defaults_to_telegram_starter_and_now_is_optional(self) -> None:
         args = build_parser().parse_args(["autostart", "install", "--now"])

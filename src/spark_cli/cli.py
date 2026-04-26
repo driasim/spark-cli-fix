@@ -451,6 +451,73 @@ def verify_pinned_commit(name: str, target: Path, commit: str, *, require_signed
         raise SystemExit(f"git checkout mismatch for {name}: expected {commit}, got {resolved}")
 
 
+@dataclass
+class ModuleProvenanceResult:
+    name: str
+    source: str
+    commit: str
+    ok: bool
+    signature_enforced: bool
+    attestation_present: bool
+    detail: str
+    warnings: list[str]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "source": self.source,
+            "commit": self.commit,
+            "ok": self.ok,
+            "signature_enforced": self.signature_enforced,
+            "attestation_present": self.attestation_present,
+            "detail": self.detail,
+            "warnings": self.warnings,
+        }
+
+
+class ReportOnlyModuleProvenanceVerifier:
+    """Non-enforcing verifier surface for future Sigstore/attestation checks."""
+
+    def verify_registry_entry(self, name: str, metadata: dict[str, Any]) -> ModuleProvenanceResult:
+        source = str(metadata.get("source", "")).strip()
+        commit = str(metadata.get("commit", "")).strip()
+        signature_enforced = bool(metadata.get("require_signed_commit", False))
+        attestation_present = bool(metadata.get("attestation") or metadata.get("attestation_ref"))
+        warnings: list[str] = []
+        ok = True
+        if not is_git_source(source):
+            ok = False
+            warnings.append("module source is not a git URL")
+        try:
+            pinned_commit = validate_commit_pin(commit)
+        except SystemExit:
+            ok = False
+            warnings.append("module is missing a full commit pin")
+        else:
+            if not pinned_commit:
+                ok = False
+                warnings.append("module is missing a full commit pin")
+        if not signature_enforced:
+            warnings.append("commit signature enforcement is report-only")
+        if not attestation_present:
+            warnings.append("module attestation is not declared yet")
+        detail = (
+            "Commit pin is present; signature and attestation checks are report-only."
+            if ok
+            else "Module provenance metadata is incomplete."
+        )
+        return ModuleProvenanceResult(
+            name=name,
+            source=source,
+            commit=commit,
+            ok=ok,
+            signature_enforced=signature_enforced,
+            attestation_present=attestation_present,
+            detail=detail,
+            warnings=warnings,
+        )
+
+
 def clone_module_source(
     name: str,
     source: str,
@@ -989,6 +1056,33 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
         "ok": all(check["ok"] for check in checks),
         "summary": "Spark installer integrity verification",
         "manifest": str(INSTALLER_MANIFEST_PATH),
+        "checks": checks,
+    }
+
+
+def collect_module_provenance_payload(
+    *,
+    registry: dict[str, Any] | None = None,
+    verifier: ReportOnlyModuleProvenanceVerifier | None = None,
+) -> dict[str, Any]:
+    registry_payload = registry if registry is not None else load_registry_definition()
+    modules = registry_payload.get("modules", {}) if isinstance(registry_payload, dict) else {}
+    verifier = verifier or ReportOnlyModuleProvenanceVerifier()
+    checks: list[dict[str, Any]] = []
+    for name, metadata in sorted(modules.items()):
+        if not isinstance(metadata, dict) or not bool(metadata.get("blessed", False)):
+            continue
+        result = verifier.verify_registry_entry(str(name), metadata)
+        checks.append(result.as_dict())
+    return {
+        "ok": all(check["ok"] for check in checks),
+        "summary": "Spark module provenance report",
+        "mode": "report_only",
+        "enforcement": {
+            "commit_pins": "required",
+            "signed_commits": "report_only",
+            "attestations": "report_only",
+        },
         "checks": checks,
     }
 
@@ -2655,6 +2749,7 @@ def module_env_path(module: Module) -> Path | None:
 
 
 def update_env_file(path: Path, values: dict[str, str]) -> None:
+    assert_no_linked_write_path(path)
     require_write_allowed(path, safe_root=spark_write_safe_root(), subject="module env write")
     start = "# --- spark-cli managed start ---"
     end = "# --- spark-cli managed end ---"
@@ -2683,6 +2778,7 @@ def update_env_file(path: Path, values: dict[str, str]) -> None:
 
 
 def remove_managed_env_block(path: Path) -> None:
+    assert_no_linked_write_path(path)
     require_write_allowed(path, safe_root=spark_write_safe_root(), subject="module env cleanup")
     start = "# --- spark-cli managed start ---"
     end = "# --- spark-cli managed end ---"
@@ -3917,6 +4013,8 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    if getattr(args, "doctor_command", None) == "llm":
+        return cmd_doctor_llm(args)
     payload = collect_status_payload()
     if args.json:
         print(json.dumps(payload, indent=2))
@@ -3924,6 +4022,284 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("Spark CLI spike doctor")
         print(json.dumps(payload, indent=2))
     return 0 if payload.get("ok") else 1
+
+
+SENSITIVE_VALUE_PATTERNS = [
+    re.compile(r"\b\d{7,12}:[A-Za-z0-9_-]{30,}\b"),
+    re.compile(r"\b(?:sk|sk-proj|sk-ant|gho|ghp|glpat|xoxb|xoxp|AIza)[A-Za-z0-9_\-]{16,}\b"),
+    re.compile(r"(?i)(api[_-]?key|token|secret|password|authorization)(\s*[:=]\s*)([^\s,;\"']+)"),
+    re.compile(r"(?i)(bearer\s+)([A-Za-z0-9._\-]{16,})"),
+]
+
+
+def redact_sensitive_text(value: str) -> str:
+    redacted = str(value)
+    for pattern in SENSITIVE_VALUE_PATTERNS:
+        if pattern.pattern.startswith("(?i)(api"):
+            redacted = pattern.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", redacted)
+        elif pattern.pattern.startswith("(?i)(bearer"):
+            redacted = pattern.sub(lambda match: f"{match.group(1)}[REDACTED]", redacted)
+        else:
+            redacted = pattern.sub("[REDACTED]", redacted)
+    return redacted
+
+
+def redact_for_llm(value: Any) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if re.search(r"(?i)(api[_-]?key|token|secret|password|authorization)", key_text):
+                if isinstance(item, bool):
+                    result[key_text] = item
+                elif item in (None, "", [], {}):
+                    result[key_text] = item
+                else:
+                    result[key_text] = "[REDACTED]"
+            else:
+                result[key_text] = redact_for_llm(item)
+        return result
+    if isinstance(value, list):
+        return [redact_for_llm(item) for item in value]
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    return value
+
+
+def collect_llm_doctor_context(problem: str, *, include_logs: bool = False, log_lines: int = 80) -> dict[str, Any]:
+    status_payload = collect_status_payload()
+    context: dict[str, Any] = {
+        "problem": problem,
+        "status": status_payload,
+        "providers": provider_status_payload(),
+        "verify": collect_verify_payload(deep=False),
+        "local_time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "safety": {
+            "secrets_redacted": True,
+            "logs_included": bool(include_logs),
+            "mode": "advisory_only",
+        },
+    }
+    if include_logs:
+        logs: dict[str, list[str]] = {}
+        for module in status_payload.get("modules", []):
+            if not isinstance(module, dict) or not module.get("name"):
+                continue
+            name = str(module["name"])
+            lines = tail_log_lines(module_log_path(name), log_lines)
+            if lines:
+                logs[name] = [redact_sensitive_text(line.rstrip()) for line in lines]
+        context["logs"] = logs
+    return redact_for_llm(context)
+
+
+def render_llm_doctor_prompt(context: dict[str, Any]) -> str:
+    return (
+        "You are Spark Doctor, a local repair advisor for the Spark agent stack.\n"
+        "The user explicitly asked you to diagnose a Spark problem. Work only from the redacted local context below.\n\n"
+        "Security rules:\n"
+        "- Never ask for or print secrets, tokens, API keys, cookies, private keys, or raw environment dumps.\n"
+        "- Do not suggest raw provider API calls that require tokens; prefer Spark CLI repair commands such as `spark fix telegram`, `spark restart`, `spark verify`, and `spark logs`.\n"
+        "- Do not recommend publishing logs unless the user has reviewed them.\n"
+        "- Prefer reversible commands and explicit confirmation before destructive actions.\n"
+        "- If a fix could help upstream Spark, suggest creating a sanitized PR only after the local fix is understood.\n\n"
+        "Engineering rules:\n"
+        "- Think before coding: name assumptions and ask for missing information when needed.\n"
+        "- Simplicity first: prefer the smallest repair that restores the user's system.\n"
+        "- Surgical changes: avoid unrelated refactors.\n"
+        "- Goal driven: give concrete verification commands.\n\n"
+        "Return concise Markdown with these sections:\n"
+        "1. Likely Cause\n"
+        "2. Local Fix Plan\n"
+        "3. Commands To Run\n"
+        "4. Verification\n"
+        "5. Upstream PR Candidate\n\n"
+        "Redacted local context JSON:\n"
+        f"{json.dumps(context, indent=2, sort_keys=True)}\n"
+    )
+
+
+def configured_llm_role_state(role: str) -> dict[str, Any]:
+    setup_state = load_json(CONFIG_PATH, {})
+    llm_state = setup_state.get("llm") if isinstance(setup_state, dict) else {}
+    if not isinstance(llm_state, dict):
+        return {}
+    roles = llm_state.get("roles")
+    if isinstance(roles, dict) and isinstance(roles.get(role), dict):
+        state = dict(roles[role])
+    else:
+        state = dict(llm_state)
+    state.setdefault("provider", llm_state.get("provider"))
+    state.setdefault("model", llm_state.get("model"))
+    state.setdefault("auth_mode", llm_state.get("auth_mode"))
+    return state
+
+
+def resolve_llm_doctor_target(args: argparse.Namespace) -> dict[str, Any]:
+    requested_provider = getattr(args, "provider", None)
+    requested_role = getattr(args, "role", "builder")
+    role_order = [requested_role, "chat", "builder", "mission", "memory"]
+    seen: set[str] = set()
+    for role in role_order:
+        if role in seen:
+            continue
+        seen.add(role)
+        state = configured_llm_role_state(role)
+        provider = str(requested_provider or state.get("provider") or "not_configured")
+        if provider == "not_configured":
+            continue
+        spec = LLM_PROVIDER_ENV.get(provider)
+        if not spec:
+            continue
+        model = str(getattr(args, "model", None) or state.get("model") or spec.get("model_default") or "")
+        base_url = str(getattr(args, "base_url", None) or state.get("base_url") or spec.get("base_url_default") or "")
+        auth_mode = str(state.get("auth_mode") or "not_configured")
+        if provider in {"openai", "zai", "minimax"}:
+            secret_id = spec.get("api_key_secret")
+            api_key = fetch_secret(str(secret_id)) if secret_id else None
+            if api_key:
+                return {
+                    "provider": provider,
+                    "role": role,
+                    "model": model,
+                    "base_url": base_url,
+                    "api_key": api_key,
+                    "auth_mode": "api_key",
+                }
+        if provider == "ollama":
+            return {
+                "provider": provider,
+                "role": role,
+                "model": model,
+                "base_url": base_url,
+                "auth_mode": "local",
+            }
+        if auth_mode not in {"not_configured", ""}:
+            return {
+                "provider": provider,
+                "role": role,
+                "model": model,
+                "base_url": base_url,
+                "auth_mode": auth_mode,
+                "unsupported": True,
+            }
+    raise SystemExit("No directly callable LLM provider is configured for Spark Doctor. Run `spark setup` and choose OpenAI, Z.AI, MiniMax, or Ollama for chat/builder.")
+
+
+def openai_compatible_chat_completion(target: dict[str, Any], prompt: str) -> str:
+    base_url = str(target["base_url"]).rstrip("/")
+    url = f"{base_url}/chat/completions"
+    body = {
+        "model": target["model"],
+        "messages": [
+            {"role": "system", "content": "You are Spark Doctor. Be concise, practical, and security careful."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+    }
+    data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {target['api_key']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    choices = payload.get("choices")
+    if not choices:
+        raise SystemExit("LLM provider returned no choices.")
+    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+    content = message.get("content")
+    if not content:
+        raise SystemExit("LLM provider returned an empty doctor response.")
+    return str(content)
+
+
+def ollama_chat_completion(target: dict[str, Any], prompt: str) -> str:
+    base_url = str(target["base_url"]).rstrip("/")
+    url = f"{base_url}/api/chat"
+    body = {
+        "model": target["model"],
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": "You are Spark Doctor. Be concise, practical, and security careful."},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    message = payload.get("message") if isinstance(payload, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not content:
+        raise SystemExit("Ollama returned an empty doctor response.")
+    return str(content)
+
+
+def call_llm_doctor(target: dict[str, Any], prompt: str) -> str:
+    if target.get("unsupported"):
+        provider = target.get("provider")
+        raise SystemExit(
+            f"Spark Doctor cannot directly call {provider} via {target.get('auth_mode')} yet. "
+            "Use --prompt-out to review the redacted prompt, or configure OpenAI/Z.AI/MiniMax/Ollama."
+        )
+    provider = target["provider"]
+    if provider in {"openai", "zai", "minimax"}:
+        return openai_compatible_chat_completion(target, prompt)
+    if provider == "ollama":
+        return ollama_chat_completion(target, prompt)
+    raise SystemExit(f"Spark Doctor cannot directly call provider `{provider}` yet.")
+
+
+def write_doctor_report(content: str, *, prefix: str = "spark-doctor") -> Path:
+    output_dir = SPARK_HOME / "doctor"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path = output_dir / f"{prefix}-{stamp}.md"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def cmd_doctor_llm(args: argparse.Namespace) -> int:
+    problem = " ".join(getattr(args, "problem", []) or []).strip() or "Spark is not working correctly."
+    context = collect_llm_doctor_context(
+        problem,
+        include_logs=bool(getattr(args, "include_logs", False)),
+        log_lines=int(getattr(args, "log_lines", 80)),
+    )
+    prompt = render_llm_doctor_prompt(context)
+    if getattr(args, "prompt_out", None):
+        prompt_path = Path(args.prompt_out).expanduser()
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text(prompt, encoding="utf-8")
+        print(f"Wrote redacted Spark Doctor prompt: {prompt_path}")
+        return 0
+    target = resolve_llm_doctor_target(args)
+    response = call_llm_doctor(target, prompt)
+    report = (
+        "# Spark Doctor Report\n\n"
+        f"Provider: {target['provider']} ({target.get('model') or 'default'})\n"
+        f"Role: {target.get('role')}\n"
+        f"Logs included: {bool(getattr(args, 'include_logs', False))}\n\n"
+        f"{response.strip()}\n\n"
+        "## Sharing Upstream\n"
+        "This report is local. Do not paste it into a PR until you review it for private paths, project names, and sensitive context.\n"
+        "If the fix is broadly useful, create a small PR with the code/test change, not raw logs or secrets.\n"
+    )
+    if getattr(args, "save_report", False):
+        path = write_doctor_report(report)
+        print(f"Saved Spark Doctor report: {path}")
+    print(report)
+    return 0
 
 
 def collect_telegram_fix_payload() -> dict[str, Any]:
@@ -4539,6 +4915,20 @@ def onboarding_checklist() -> list[str]:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
+    if getattr(args, "provenance", False):
+        payload = collect_module_provenance_payload()
+        if args.json:
+            print(json.dumps(payload, indent=2))
+            return 0 if payload["ok"] else 1
+        print(payload["summary"])
+        print(f"Mode: {payload['mode']}")
+        for check in payload["checks"]:
+            marker = "[OK]" if check["ok"] else "[FIX]"
+            print(f"{marker} {check['name']}: {check['detail']}")
+            for warning in check.get("warnings", []):
+                print(f"      warning: {warning}")
+        return 0 if payload["ok"] else 1
+
     if getattr(args, "installers", False):
         payload = collect_installer_integrity_payload(hosted=bool(getattr(args, "hosted_installers", False)))
         if args.json:
@@ -6382,8 +6772,21 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.set_defaults(func=cmd_status)
 
     doctor_parser = subparsers.add_parser("doctor", help="Run diagnostic status and emit structured output")
+    doctor_subparsers = doctor_parser.add_subparsers(dest="doctor_command")
     doctor_parser.add_argument("--json", action="store_true")
     doctor_parser.set_defaults(func=cmd_doctor)
+
+    doctor_llm_parser = doctor_subparsers.add_parser("llm", help="Ask the user's configured LLM for a redacted Spark repair plan")
+    doctor_llm_parser.add_argument("problem", nargs="*", help="Problem statement, for example: Telegram is quiet after restart")
+    doctor_llm_parser.add_argument("--role", choices=LLM_ROLES, default="builder", help="Preferred LLM role to use (default: builder)")
+    doctor_llm_parser.add_argument("--provider", choices=LLM_PROVIDER_CHOICES, help="Override the configured provider for this doctor run")
+    doctor_llm_parser.add_argument("--model", help="Override the configured model for this doctor run")
+    doctor_llm_parser.add_argument("--base-url", help="Override the configured OpenAI-compatible/Ollama base URL")
+    doctor_llm_parser.add_argument("--include-logs", action="store_true", help="Include redacted module log tails in the doctor prompt")
+    doctor_llm_parser.add_argument("--log-lines", type=int, default=80, help="Number of log lines per module when --include-logs is set")
+    doctor_llm_parser.add_argument("--prompt-out", help="Write the redacted prompt to a file instead of calling the LLM")
+    doctor_llm_parser.add_argument("--save-report", action="store_true", help="Save the doctor report under ~/.spark/doctor")
+    doctor_llm_parser.set_defaults(func=cmd_doctor)
 
     verify_parser = subparsers.add_parser("verify", help="Verify launch-critical Spark wiring end to end")
     verify_parser.add_argument("--json", action="store_true")
@@ -6391,6 +6794,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--onboarding", action="store_true", help="Run first-user onboarding checks and print the Telegram finish checklist")
     verify_parser.add_argument("--installers", action="store_true", help="Verify installer script hashes against the committed manifest")
     verify_parser.add_argument("--hosted-installers", action="store_true", help="Also compare agent.sparkswarm.ai installers against the committed manifest")
+    verify_parser.add_argument("--provenance", action="store_true", help="Report blessed module commit-pin, signature, and attestation posture")
     verify_parser.set_defaults(func=cmd_verify)
 
     fix_parser = subparsers.add_parser("fix", help="Run targeted repair guidance for common Spark issues")
