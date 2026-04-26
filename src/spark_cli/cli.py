@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import ctypes
 import getpass
 import hashlib
 import json
@@ -27,6 +29,7 @@ from xml.sax.saxutils import escape as xml_escape
 import tomllib
 
 CLI_MAX_SUPPORTED_SCHEMA = 1
+DPAPI_SECRET_PREFIX = "dpapi:v1:"
 
 
 SPARK_HOME = Path(os.environ.get("SPARK_HOME", Path.home() / ".spark")).expanduser()
@@ -390,6 +393,68 @@ def save_secrets_index(index: dict[str, str]) -> None:
     save_json(SECRETS_INDEX_PATH, index)
 
 
+class _DataBlob(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.c_ulong), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+
+def _crypt32() -> Any:
+    return ctypes.windll.crypt32
+
+
+def _kernel32() -> Any:
+    return ctypes.windll.kernel32
+
+
+def dpapi_protect(value: str) -> str:
+    if os.name != "nt":
+        return value
+    raw = value.encode("utf-8")
+    buffer = ctypes.create_string_buffer(raw)
+    in_blob = _DataBlob(len(raw), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
+    out_blob = _DataBlob()
+    if not _crypt32().CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
+        raise OSError("CryptProtectData failed")
+    try:
+        protected = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        _kernel32().LocalFree(out_blob.pbData)
+    return DPAPI_SECRET_PREFIX + base64.b64encode(protected).decode("ascii")
+
+
+def dpapi_unprotect(value: str) -> str:
+    if os.name != "nt" or not value.startswith(DPAPI_SECRET_PREFIX):
+        return value
+    protected = base64.b64decode(value[len(DPAPI_SECRET_PREFIX) :])
+    buffer = ctypes.create_string_buffer(protected)
+    in_blob = _DataBlob(len(protected), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
+    out_blob = _DataBlob()
+    if not _crypt32().CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
+        raise OSError("CryptUnprotectData failed")
+    try:
+        raw = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        _kernel32().LocalFree(out_blob.pbData)
+    return raw.decode("utf-8")
+
+
+def harden_secret_file(path: Path) -> None:
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    if os.name != "nt" or not path.exists():
+        return
+    try:
+        subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{os.environ.get('USERNAME', '')}:F"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        pass
+
+
 def store_secret(secret_id: str, value: str, preferred: str = "keychain") -> str:
     """Store a secret value. Returns the backend actually used ('keychain' or 'file')."""
     ensure_state_dirs()
@@ -403,12 +468,9 @@ def store_secret(secret_id: str, value: str, preferred: str = "keychain") -> str
         except Exception:
             pass
     file_secrets = load_json(SECRETS_FILE_PATH, {})
-    file_secrets[secret_id] = value
+    file_secrets[secret_id] = dpapi_protect(value)
     save_json(SECRETS_FILE_PATH, file_secrets)
-    try:
-        os.chmod(SECRETS_FILE_PATH, 0o600)
-    except OSError:
-        pass
+    harden_secret_file(SECRETS_FILE_PATH)
     index[secret_id] = "file"
     save_secrets_index(index)
     return "file"
@@ -428,7 +490,8 @@ def fetch_secret(secret_id: str) -> str | None:
         except Exception:
             return None
     if backend == "file":
-        return load_json(SECRETS_FILE_PATH, {}).get(secret_id)
+        value = load_json(SECRETS_FILE_PATH, {}).get(secret_id)
+        return dpapi_unprotect(value) if isinstance(value, str) else None
     return None
 
 
@@ -453,6 +516,7 @@ def delete_secret(secret_id: str) -> bool:
         if secret_id in file_secrets:
             file_secrets.pop(secret_id)
             save_json(SECRETS_FILE_PATH, file_secrets)
+            harden_secret_file(SECRETS_FILE_PATH)
             removed = True
     if backend is not None:
         save_secrets_index(index)

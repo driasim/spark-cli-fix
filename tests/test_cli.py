@@ -33,6 +33,7 @@ from spark_cli.cli import (
     console_safe_text,
     CONFIG_PATH,
     detect_runtime_binary,
+    DPAPI_SECRET_PREFIX,
     evaluate_module_health,
     clone_module_source,
     clone_target_for_module,
@@ -442,7 +443,7 @@ class SparkCliTests(unittest.TestCase):
                 profile_env = read_generated_env(module_config_dir / "spark-telegram-bot.qa-bot.env")
                 spawner_env = read_generated_env(module_config_dir / "spawner-ui.env")
                 setup_state = load_json(state_dir / "setup.json", {})
-                stored_token = load_json(config_dir / "secrets.local.json", {}).get("telegram.profiles.qa-bot.bot_token")
+                stored_token = fetch_secret("telegram.profiles.qa-bot.bot_token")
 
         self.assertEqual(profile_env["ADMIN_TELEGRAM_IDS"], "222")
         self.assertEqual(profile_env["TELEGRAM_RELAY_PORT"], "8792")
@@ -3103,7 +3104,9 @@ class SparkCliTests(unittest.TestCase):
                  patch("spark_cli.cli.read_clipboard_text", return_value="clip-secret"), \
                  patch("sys.stdout", new_callable=StringIO):
                 self.assertEqual(cmd_secrets_set(args), 0)
-            self.assertEqual(load_json(file_path, {})["llm.zai.api_key"], "clip-secret")
+                self.assertEqual(fetch_secret("llm.zai.api_key"), "clip-secret")
+            if os.name == "nt":
+                self.assertNotEqual(load_json(file_path, {})["llm.zai.api_key"], "clip-secret")
 
     def test_prompt_for_secret_uses_visible_input_for_admin_ids(self) -> None:
         with patch("builtins.input", return_value="123,456"), \
@@ -3549,6 +3552,12 @@ class SparkCliTests(unittest.TestCase):
                 backend = store_secret("telegram.bot_token", "abc", preferred="keychain")
                 self.assertEqual(backend, "file")
                 self.assertEqual(fetch_secret("telegram.bot_token"), "abc")
+                stored_payload = load_json(file_path, {})
+                if os.name == "nt":
+                    self.assertNotEqual(stored_payload["telegram.bot_token"], "abc")
+                    self.assertTrue(stored_payload["telegram.bot_token"].startswith(DPAPI_SECRET_PREFIX))
+                else:
+                    self.assertEqual(stored_payload["telegram.bot_token"], "abc")
                 self.assertEqual(list_stored_secrets(), {"telegram.bot_token": "file"})
                 self.assertTrue(delete_secret("telegram.bot_token"))
                 self.assertIsNone(fetch_secret("telegram.bot_token"))
