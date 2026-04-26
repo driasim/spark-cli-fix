@@ -1318,6 +1318,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("Choose Spark access level", output)
         self.assertIn("Level 2 - Build When Asked", output)
         self.assertIn("Level 4 - Full Access", output)
+        self.assertIn("operating-system access", output)
         self.assertIn("/diagnose", output)
         self.assertIn("/run <goal>", output)
         self.assertIn("/access <1|2|3|4>", output)

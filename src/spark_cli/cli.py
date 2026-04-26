@@ -5025,7 +5025,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
             {"level": "1", "name": "Chat Only", "use": "Conversation, memory, recall, and diagnostics. No Spawner builds."},
             {"level": "2", "name": "Build When Asked", "use": "Default. Spark can use Spawner only when you clearly ask it to build or run a mission."},
             {"level": "3", "name": "Research + Build", "use": "Adds public links, docs, and GitHub research. Spark can still build when you ask."},
-            {"level": "4", "name": "Full Access", "use": "Adds local workspace builds, debugging, repo inspection, and deeper missions. Destructive actions still need explicit approval."},
+            {"level": "4", "name": "Full Access", "use": "Adds operating-system access for local project builds, debugging, repo inspection, and deeper missions. Destructive actions still need explicit approval."},
         ],
         "telegram_commands": [
             { "command": "/start", "use": "Show the basic command surface." },
