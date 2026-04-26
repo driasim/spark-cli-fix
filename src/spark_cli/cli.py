@@ -28,6 +28,8 @@ from xml.sax.saxutils import escape as xml_escape
 
 import tomllib
 
+from .runtime_policy import run_runtime_command, runtime_command_argv, split_single_argv_command
+
 CLI_MAX_SUPPORTED_SCHEMA = 1
 DPAPI_SECRET_PREFIX = "dpapi:v1:"
 PRIVATE_FILE_MODE = 0o600
@@ -3251,7 +3253,7 @@ def run_module_hook(module: Module, hook_name: str) -> None:
     command = module.hook_command(hook_name)
     if not command:
         return
-    result = run_shell(command, module.path, env=module_runtime_env(module))
+    result = run_runtime_command(command, module.path, env=module_runtime_env(module))
     if result.returncode != 0:
         raise SystemExit(
             f"{module.name} hook `{hook_name}` failed: {summarize_command_output(result)}"
@@ -3319,7 +3321,7 @@ def evaluate_module_health(module: Module) -> dict[str, Any]:
             "failure_hint": None,
         }
     timeout_seconds = ready_timeout_seconds(module)
-    result = run_shell(command, module.path, env=module_runtime_env(module), timeout=timeout_seconds)
+    result = run_runtime_command(command, module.path, env=module_runtime_env(module), timeout=timeout_seconds)
     detail = summarize_command_output(result)
     failure_hint = str(module.manifest.get("healthcheck", {}).get("failure_hint", "")).strip() or None
     success_hint = str(module.manifest.get("healthcheck", {}).get("success_hint", "")).strip() or None
@@ -3836,39 +3838,6 @@ def persist_keychain_secrets(bundle: list[Module], secret_values: dict[str, str]
     return report
 
 
-def run_shell(
-    command: str,
-    cwd: Path,
-    env: dict[str, str] | None = None,
-    timeout: int | None = None,
-) -> subprocess.CompletedProcess[str]:
-    argv = runtime_command_argv(command)
-    try:
-        return subprocess.run(
-            argv,
-            cwd=str(cwd),
-            shell=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env or shell_command_env(),
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as error:
-        stdout = error.stdout if isinstance(error.stdout, str) else ""
-        stderr = error.stderr if isinstance(error.stderr, str) else ""
-        stderr = (stderr + "\n" if stderr else "") + f"command timed out after {timeout}s"
-        return subprocess.CompletedProcess(command, 124, stdout=stdout, stderr=stderr)
-    except OSError as error:
-        return subprocess.CompletedProcess(
-            command,
-            127,
-            stdout="",
-            stderr=f"Could not start runtime command `{command}`: {error.__class__.__name__}. Check that the required tool is installed and on PATH.",
-        )
-
-
 def command_with_managed_python(command: str) -> str:
     return subprocess.list2cmdline(install_command_argv(command))
 
@@ -3888,34 +3857,8 @@ def resolve_install_executable(name: str) -> str:
     )
 
 
-def _command_parts(command: str, subject: str) -> list[str]:
-    parts = shlex.split(command, posix=True)
-    if not parts:
-        raise SystemExit(f"{subject} cannot be empty.")
-    if any(part in {"&&", "||", ";", "|", ">", ">>", "<"} for part in parts):
-        raise SystemExit(f"{subject} must be a single argv command, not a shell command chain.")
-    return parts
-
-
-def runtime_command_argv(command: str) -> list[str]:
-    parts = _command_parts(command, "Runtime command")
-    executable = parts[0].lower()
-    if executable in {"python", "python3"}:
-        return [str(Path(sys.executable)), *parts[1:]]
-    if executable == "node":
-        return [resolve_install_executable("node"), *parts[1:]]
-    if executable == "npm":
-        return [resolve_install_executable("npm"), *parts[1:]]
-    if executable == "uv" and len(parts) >= 2 and parts[1] == "run":
-        return [resolve_install_executable("uv"), *parts[1:]]
-    raise SystemExit(
-        "Unsupported runtime command executable. Allowed runtime commands must start with "
-        "python, python3, node, npm, or uv run."
-    )
-
-
 def install_command_argv(command: str) -> list[str]:
-    parts = _command_parts(command, "Install command")
+    parts = split_single_argv_command(command, "Install command")
     executable = parts[0].lower()
     if executable in {"python", "python3"}:
         return [str(Path(sys.executable)), *parts[1:]]
@@ -5386,7 +5329,7 @@ def wait_for_ready_check(
             exit_code = process.poll()
             if exit_code is not None:
                 if not ready_check.startswith(("http://", "https://")):
-                    result = run_shell(
+                    result = run_runtime_command(
                         ready_check,
                         module.path,
                         env=module_runtime_env(module, profile),
@@ -5406,7 +5349,7 @@ def wait_for_ready_check(
             except (urllib.error.URLError, TimeoutError, OSError) as error:
                 last_error = str(error)
         else:
-            result = run_shell(
+            result = run_runtime_command(
                 ready_check,
                 module.path,
                 env=module_runtime_env(module, profile),

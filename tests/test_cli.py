@@ -2901,7 +2901,7 @@ class SparkCliTests(unittest.TestCase):
         completed = subprocess.CompletedProcess("npm run health:polling", 0, stdout="Relay auth: configured", stderr="")
 
         with patch("spark_cli.cli.module_runtime_env", return_value={}), \
-             patch("spark_cli.cli.run_shell", return_value=completed), \
+             patch("spark_cli.cli.run_runtime_command", return_value=completed), \
              patch("spark_cli.cli.time.time", side_effect=[100.0, 100.5, 101.0, 102.0, 103.0]), \
              patch("spark_cli.cli.time.sleep", return_value=None):
             ready, detail = wait_for_ready_check(module, process=EventuallyExitedProcess())  # type: ignore[arg-type]
@@ -3003,7 +3003,7 @@ class SparkCliTests(unittest.TestCase):
         )
 
         with patch("spark_cli.cli.module_runtime_env", return_value={}), \
-             patch("spark_cli.cli.run_shell", return_value=completed) as run:
+             patch("spark_cli.cli.run_runtime_command", return_value=completed) as run:
             ready, detail = wait_for_ready_check(module, process=ExitedProcess())  # type: ignore[arg-type]
 
         self.assertFalse(ready)
@@ -3093,7 +3093,7 @@ class SparkCliTests(unittest.TestCase):
 
         completed = subprocess.CompletedProcess("npm run health", 124, stdout="", stderr="command timed out after 7s")
         with patch("spark_cli.cli.module_runtime_env", return_value={}), \
-             patch("spark_cli.cli.run_shell", return_value=completed) as run:
+             patch("spark_cli.cli.run_runtime_command", return_value=completed) as run:
             result = evaluate_module_health(module)
 
         self.assertFalse(result["healthy"])
@@ -3504,7 +3504,7 @@ class SparkCliTests(unittest.TestCase):
 
     def test_runtime_command_argv_allowlists_runtime_tools(self) -> None:
         self.assertEqual(runtime_command_argv("python -m spark_researcher.cli status")[:3], [str(Path(sys.executable)), "-m", "spark_researcher.cli"])
-        with patch("spark_cli.cli.shutil.which", return_value="C:/node/npm.CMD"):
+        with patch("spark_cli.runtime_policy.shutil.which", return_value="C:/node/npm.CMD"):
             self.assertEqual(runtime_command_argv("npm run health:runtime"), ["C:/node/npm.CMD", "run", "health:runtime"])
         with self.assertRaises(SystemExit):
             runtime_command_argv("cmd /c echo unsafe")
