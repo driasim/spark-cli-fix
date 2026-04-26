@@ -1330,6 +1330,37 @@ def llm_setup_state(provider: str, env: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def telegram_profile_webhook_urls(setup_state: dict[str, Any] | None = None) -> list[str]:
+    setup = setup_state if isinstance(setup_state, dict) else load_json(CONFIG_PATH, {})
+    profiles = setup.get("telegram_profiles") if isinstance(setup, dict) else None
+    urls: list[str] = []
+    if isinstance(profiles, dict):
+        for profile_state in profiles.values():
+            if not isinstance(profile_state, dict):
+                continue
+            webhook_url = profile_state.get("webhook_url")
+            if isinstance(webhook_url, str) and webhook_url.strip():
+                url = webhook_url.strip()
+            else:
+                try:
+                    relay_port = int(profile_state.get("relay_port", 0))
+                except (TypeError, ValueError):
+                    continue
+                if relay_port <= 0 or relay_port > 65535:
+                    continue
+                url = f"http://127.0.0.1:{relay_port}/spawner-events"
+            if url not in urls:
+                urls.append(url)
+    return urls
+
+
+def default_telegram_webhook_url(spawner_ui_url: str | None) -> str:
+    relay_base = spawner_ui_url or "http://127.0.0.1:5173"
+    if relay_base.endswith(":5173"):
+        relay_base = relay_base[:-4] + "8788"
+    return f"{relay_base}/spawner-events"
+
+
 def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Module], secret_values: dict[str, str]) -> dict[str, dict[str, str]]:
     gateway = modules_by_name["spark-telegram-bot"]
     spawner = modules_by_name["spawner-ui"]
@@ -1356,11 +1387,9 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
         gateway_env["SPARK_CHARACTER_ROOT"] = str(character.path)
     gateway_env.update(llm_env)
 
-    relay_base = args.spawner_ui_url or "http://127.0.0.1:5173"
-    if relay_base.endswith(":5173"):
-        relay_base = relay_base[:-4] + "8788"
+    webhook_urls = telegram_profile_webhook_urls() or [default_telegram_webhook_url(args.spawner_ui_url)]
     spawner_env = {
-        "MISSION_CONTROL_WEBHOOK_URLS": f"{relay_base}/spawner-events",
+        "MISSION_CONTROL_WEBHOOK_URLS": ",".join(webhook_urls),
         "SPARK_WORKSPACE_ROOT": str(SPARK_HOME / "workspaces"),
         "SPAWNER_STATE_DIR": str(STATE_DIR / "spawner-ui"),
     }

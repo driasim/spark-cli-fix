@@ -1999,18 +1999,19 @@ class SparkCliTests(unittest.TestCase):
             spawner_ui_url = None
             telegram_relay_secret = None
 
-        envs = build_module_envs(
-            Args(),
-            {
-                gateway.name: gateway,
-                builder.name: builder,
-                spawner.name: spawner,
-            },
-            {
-                "telegram.bot_token": "abc",
-                "telegram.admin_ids": "123",
-            },
-        )
+        with patch("spark_cli.cli.load_json", return_value={}):
+            envs = build_module_envs(
+                Args(),
+                {
+                    gateway.name: gateway,
+                    builder.name: builder,
+                    spawner.name: spawner,
+                },
+                {
+                    "telegram.bot_token": "abc",
+                    "telegram.admin_ids": "123",
+                },
+            )
         self.assertEqual(envs["spark-telegram-bot"]["SPAWNER_UI_URL"], "http://127.0.0.1:5173")
         self.assertEqual(envs["spark-telegram-bot"]["TELEGRAM_GATEWAY_MODE"], "polling")
         self.assertEqual(envs["spawner-ui"]["MISSION_CONTROL_WEBHOOK_URLS"], "http://127.0.0.1:8788/spawner-events")
@@ -2025,6 +2026,43 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(envs["spark-telegram-bot"]["SPARK_MISSION_LLM_PROVIDER"], "not_configured")
         self.assertEqual(envs["spark-intelligence-builder"]["SPARK_LLM_PROVIDER"], "not_configured")
         self.assertNotIn("SPARK_SPARK_LLM_PROVIDER", envs["spark-intelligence-builder"])
+
+    def test_build_module_envs_uses_configured_telegram_profile_webhooks(self) -> None:
+        gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
+        builder = make_module("spark-intelligence-builder", ["spark.runtime"])
+        spawner = make_module("spawner-ui", ["mission.execution"])
+
+        class Args:
+            spawner_ui_url = "http://127.0.0.1:5173"
+            telegram_relay_secret = None
+
+        with patch(
+            "spark_cli.cli.load_json",
+            return_value={
+                "telegram_profiles": {
+                    "spark-agi": {"relay_port": 8789},
+                    "qa": {"webhook_url": "http://127.0.0.1:8790/spawner-events"},
+                }
+            },
+        ):
+            envs = build_module_envs(
+                Args(),
+                {
+                    gateway.name: gateway,
+                    builder.name: builder,
+                    spawner.name: spawner,
+                },
+                {
+                    "telegram.bot_token": "abc",
+                    "telegram.admin_ids": "123",
+                },
+            )
+
+        self.assertEqual(
+            envs["spawner-ui"]["MISSION_CONTROL_WEBHOOK_URLS"],
+            "http://127.0.0.1:8789/spawner-events,http://127.0.0.1:8790/spawner-events",
+        )
+        self.assertNotIn("http://127.0.0.1:8788/spawner-events", envs["spawner-ui"]["MISSION_CONTROL_WEBHOOK_URLS"])
 
     def test_build_module_envs_wires_zai_gateway_configuration(self) -> None:
         gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
