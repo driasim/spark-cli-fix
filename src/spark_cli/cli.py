@@ -108,6 +108,25 @@ STATIC_PROVIDER_ENV_BLOCKLIST = {
     "ZAI_API_KEY",
     "ZAI_BASE_URL",
 }
+WRITE_DENIED_HOME_PREFIXES = (
+    ".aws",
+    ".codex",
+    ".config/gh",
+    ".config/gcloud",
+    ".docker",
+    ".gnupg",
+    ".hermes",
+    ".kube",
+    ".ssh",
+)
+WRITE_DENIED_HOME_PATHS = (
+    ".spark/config/secrets.local.json",
+)
+WRITE_DENIED_POSIX_PREFIXES = (
+    "/etc",
+    "/root",
+    "/var/run/docker.sock",
+)
 
 try:  # keyring is an optional runtime dep; we degrade gracefully without it.
     import keyring as _keyring
@@ -1209,6 +1228,92 @@ def strip_reserved_workspace_env(values: dict[str, str]) -> dict[str, str]:
     return {key: value for key, value in values.items() if key.upper() not in blocked}
 
 
+def resolve_policy_path(path: Path) -> Path:
+    expanded = path.expanduser() if isinstance(path, Path) else Path(path).expanduser()
+    real_path = expanded.__class__(os.path.realpath(os.fspath(expanded)))
+    return real_path.resolve(strict=False)
+
+
+def policy_home_path(home: Path | None = None) -> Path:
+    if home is not None:
+        return resolve_policy_path(home)
+    try:
+        return resolve_policy_path(Path.home())
+    except RuntimeError:
+        return resolve_policy_path(SPARK_HOME.parent)
+
+
+def policy_path_is_same_or_child(candidate: Path, parent: Path) -> bool:
+    candidate_text = os.path.normcase(os.path.normpath(os.fspath(resolve_policy_path(candidate))))
+    parent_text = os.path.normcase(os.path.normpath(os.fspath(resolve_policy_path(parent))))
+    try:
+        return os.path.commonpath([candidate_text, parent_text]) == parent_text
+    except ValueError:
+        return False
+
+
+def write_denied_prefixes(home: Path | None = None) -> list[Path]:
+    home_path = policy_home_path(home)
+    denied = [home_path / relative for relative in WRITE_DENIED_HOME_PREFIXES]
+    if sys.platform != "win32":
+        denied.extend(Path(prefix) for prefix in WRITE_DENIED_POSIX_PREFIXES)
+    else:
+        path_type = home_path.__class__
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            denied.extend([path_type(appdata) / "gh", path_type(appdata) / "gcloud"])
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            denied.extend([path_type(local_appdata) / "GitHub CLI", path_type(local_appdata) / "Google" / "Cloud SDK"])
+        for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "SYSTEMROOT", "WINDIR"):
+            value = os.environ.get(key)
+            if value:
+                denied.append(path_type(value))
+    return [resolve_policy_path(path) for path in denied]
+
+
+def write_denied_paths(home: Path | None = None) -> list[Path]:
+    home_path = policy_home_path(home)
+    return [resolve_policy_path(home_path / relative) for relative in WRITE_DENIED_HOME_PATHS]
+
+
+def path_is_write_denied(path: Path) -> tuple[bool, str]:
+    candidate = resolve_policy_path(path)
+    for denied_path in write_denied_paths():
+        if os.path.normcase(os.path.normpath(os.fspath(candidate))) == os.path.normcase(os.path.normpath(os.fspath(denied_path))):
+            return True, str(denied_path)
+    for denied_prefix in write_denied_prefixes():
+        if policy_path_is_same_or_child(candidate, denied_prefix):
+            return True, str(denied_prefix)
+    return False, ""
+
+
+def spark_write_safe_root() -> Path | None:
+    raw = os.environ.get("SPARK_WRITE_SAFE_ROOT", "").strip()
+    if not raw:
+        return None
+    return resolve_policy_path(Path(raw))
+
+
+def require_write_allowed(path: Path, *, safe_root: Path | None = None, subject: str = "path") -> None:
+    candidate = resolve_policy_path(path)
+    denied, reason = path_is_write_denied(candidate)
+    if denied:
+        raise SystemExit(f"Refusing {subject}: `{candidate}` is inside denied write path `{reason}`.")
+    if safe_root is not None and not policy_path_is_same_or_child(candidate, safe_root):
+        raise SystemExit(f"Refusing {subject}: `{candidate}` is outside Spark write boundary `{safe_root}`.")
+
+
+def write_boundary_env(base: dict[str, str]) -> dict[str, str]:
+    env = dict(base)
+    denied_paths = [*write_denied_paths(), *write_denied_prefixes()]
+    env["SPARK_WRITE_DENIED_PATHS"] = os.pathsep.join(str(path) for path in denied_paths)
+    safe_root = spark_write_safe_root()
+    if safe_root is not None:
+        env["SPARK_WRITE_SAFE_ROOT"] = str(safe_root)
+    return env
+
+
 def shell_command_env(*, filtered: bool = False) -> dict[str, str]:
     env = safe_parent_env() if filtered else os.environ.copy()
     current_python = Path(sys.executable)
@@ -1514,6 +1619,7 @@ def spark_builder_home() -> Path:
 
 
 def write_generated_env(path: Path, values: dict[str, str]) -> None:
+    require_write_allowed(path, subject="generated module env write")
     lines = [f"{key}={value}" for key, value in values.items()]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1540,7 +1646,7 @@ def module_runtime_env(module: Module, profile: str | None = None) -> dict[str, 
     env.update(keychain_env_for_module(module))
     if module.name == "spark-telegram-bot":
         env.update(keychain_env_for_telegram_profile(profile))
-    return env
+    return write_boundary_env(env)
 
 
 LLM_PROVIDER_ENV: dict[str, dict[str, str]] = {
@@ -2384,6 +2490,7 @@ def module_env_path(module: Module) -> Path | None:
 
 
 def update_env_file(path: Path, values: dict[str, str]) -> None:
+    require_write_allowed(path, safe_root=spark_write_safe_root(), subject="module env write")
     start = "# --- spark-cli managed start ---"
     end = "# --- spark-cli managed end ---"
     lines: list[str] = []
@@ -2411,6 +2518,7 @@ def update_env_file(path: Path, values: dict[str, str]) -> None:
 
 
 def remove_managed_env_block(path: Path) -> None:
+    require_write_allowed(path, safe_root=spark_write_safe_root(), subject="module env cleanup")
     start = "# --- spark-cli managed start ---"
     end = "# --- spark-cli managed end ---"
     if not path.exists():
@@ -3341,6 +3449,7 @@ def install_command_argv(command: str) -> list[str]:
 
 
 def run_install_command(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    require_write_allowed(cwd, safe_root=spark_write_safe_root(), subject="module install cwd")
     argv = install_command_argv(command)
     try:
         return subprocess.run(
@@ -3351,7 +3460,7 @@ def run_install_command(command: str, cwd: Path) -> subprocess.CompletedProcess[
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=shell_command_env(filtered=True),
+            env=write_boundary_env(shell_command_env(filtered=True)),
         )
     except subprocess.TimeoutExpired as error:
         stdout = error.stdout if isinstance(error.stdout, str) else ""
@@ -4628,6 +4737,7 @@ def start_module(module: Module, *, allow_boot_warnings: bool = False, profile: 
     command = module.run_command
     if not command:
         return True
+    require_write_allowed(module.path, safe_root=spark_write_safe_root(), subject=f"{module.name} module root")
 
     process_key = module_process_key(module.name, profile)
     display_name = process_key

@@ -69,8 +69,10 @@ from spark_cli.cli import (
     module_secret_env_bindings,
     next_telegram_profile_relay_port,
     normalize_telegram_profile,
+    path_is_write_denied,
     provider_env_blocklist,
     primary_telegram_profile,
+    require_write_allowed,
     check_runtime_version_for_module,
     clear_install_progress,
     coerce_config_value,
@@ -142,6 +144,7 @@ from spark_cli.cli import (
     run_llm_provider_wizard,
     run_setup_wizard,
     shell_command_env,
+    spark_write_safe_root,
     setup_is_interactive,
     strip_reserved_workspace_env,
     split_telegram_admin_ids,
@@ -150,6 +153,9 @@ from spark_cli.cli import (
     telegram_profile_runtime_status,
     tracked_process_keys_for_module,
     wait_for_ready_check,
+    write_boundary_env,
+    write_denied_paths,
+    write_denied_prefixes,
     windows_service_creationflags,
     resolve_bundle_names,
     resolve_install_target,
@@ -3110,6 +3116,50 @@ class SparkCliTests(unittest.TestCase):
         )
         self.assertEqual(stripped, {"SPARK_INTELLIGENCE_HOME": "C:/spark/state"})
 
+    def test_write_denied_paths_include_sensitive_home_locations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            home = Path(tmp_dir)
+            self.assertIn(home / ".spark" / "config" / "secrets.local.json", write_denied_paths(home))
+            self.assertIn(home / ".ssh", write_denied_prefixes(home))
+            self.assertIn(home / ".config" / "gh", write_denied_prefixes(home))
+
+    def test_path_is_write_denied_blocks_sensitive_home_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            home = Path(tmp_dir)
+            with patch("spark_cli.cli.Path.home", return_value=home):
+                denied, reason = path_is_write_denied(home / ".ssh" / "authorized_keys")
+        self.assertTrue(denied)
+        self.assertIn(".ssh", reason)
+
+    def test_require_write_allowed_honors_safe_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            safe_root = Path(tmp_dir) / "modules"
+            inside = safe_root / "spark-character"
+            outside = Path(tmp_dir) / "outside"
+            require_write_allowed(inside, safe_root=safe_root, subject="module root")
+            with self.assertRaises(SystemExit) as error:
+                require_write_allowed(outside, safe_root=safe_root, subject="module root")
+        self.assertIn("outside Spark write boundary", str(error.exception))
+
+    def test_write_boundary_env_exports_denylist_and_safe_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            safe_root = Path(tmp_dir) / "modules"
+            with patch.dict(os.environ, {"SPARK_WRITE_SAFE_ROOT": str(safe_root)}, clear=False):
+                env = write_boundary_env({"PATH": "C:/safe-bin"})
+                resolved_root = spark_write_safe_root()
+        self.assertEqual(env["PATH"], "C:/safe-bin")
+        self.assertIsNotNone(resolved_root)
+        self.assertEqual(env["SPARK_WRITE_SAFE_ROOT"], str(resolved_root))
+        self.assertIn("SPARK_WRITE_DENIED_PATHS", env)
+
+    def test_update_env_file_refuses_denied_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            home = Path(tmp_dir)
+            with patch("spark_cli.cli.Path.home", return_value=home):
+                with self.assertRaises(SystemExit) as error:
+                    update_env_file(home / ".ssh" / "spark.env", {"A": "1"})
+        self.assertIn("denied write path", str(error.exception))
+
     def test_read_generated_env_ignores_comments_and_blank_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             env_path = Path(tmp_dir) / "module.env"
@@ -3148,6 +3198,15 @@ class SparkCliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 127)
         self.assertIn("Could not start install command `npm ci`", result.stderr)
+
+    def test_run_install_command_refuses_cwd_outside_safe_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            safe_root = Path(tmp_dir) / "modules"
+            outside = Path(tmp_dir) / "outside"
+            with patch.dict(os.environ, {"SPARK_WRITE_SAFE_ROOT": str(safe_root)}, clear=False):
+                with self.assertRaises(SystemExit) as error:
+                    run_install_command("python -m pip --version", outside)
+        self.assertIn("outside Spark write boundary", str(error.exception))
 
     def test_execute_install_commands_uses_managed_python_for_python_commands(self) -> None:
         module = Module(
