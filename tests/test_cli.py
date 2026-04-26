@@ -106,6 +106,8 @@ from spark_cli.cli import (
     store_secret,
     strip_keychain_env_vars,
     tail_log_lines,
+    validate_new_telegram_bot_tokens,
+    validate_telegram_bot_token,
     Module,
     MODULE_CONFIG_DIR,
     REGISTRY_PATH,
@@ -452,7 +454,8 @@ class SparkCliTests(unittest.TestCase):
                 patch("spark_cli.cli.keychain_available", return_value=False),
                 patch("spark_cli.cli.resolve_installed_modules", return_value={"spark-telegram-bot": bot, "spawner-ui": spawner}),
             ]
-            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], \
+                 patch("spark_cli.cli.validate_telegram_bot_token", return_value={"username": "qa_bot"}):
                 configure_telegram_profile(Args())
                 profile_env = read_generated_env(module_config_dir / "spark-telegram-bot.qa-bot.env")
                 spawner_env = read_generated_env(module_config_dir / "spawner-ui.env")
@@ -468,6 +471,67 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(setup_state["telegram_profiles"]["qa-bot"]["relay_port"], 8792)
         self.assertEqual(setup_state["primary_telegram_profile"], "qa-bot")
         self.assertEqual(stored_token, "profile-token")
+
+    def test_configure_telegram_profile_rejects_bad_token_without_overwriting_existing_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_dir = root / "config"
+            state_dir = root / "state"
+            module_config_dir = config_dir / "modules"
+            bot_path = root / "spark-telegram-bot"
+            spawner_path = root / "spawner-ui"
+            bot_path.mkdir()
+            spawner_path.mkdir()
+            bot = Module(
+                name="spark-telegram-bot",
+                path=bot_path,
+                manifest={
+                    "module": {"name": "spark-telegram-bot", "version": "0.1.0", "kind": "service", "plane": "ingress"},
+                    "provides": {"capabilities": ["telegram.ingress"]},
+                    "needs": {"secrets": ["telegram.bot_token"]},
+                    "secrets": {"telegram_bot_token": {"env_var": "BOT_TOKEN", "storage": "keychain"}},
+                },
+            )
+            spawner = Module(
+                name="spawner-ui",
+                path=spawner_path,
+                manifest={
+                    "module": {"name": "spawner-ui", "version": "0.1.0", "kind": "app", "plane": "execution"},
+                    "provides": {"capabilities": []},
+                    "config": {"output": ".env"},
+                },
+            )
+            module_config_dir.mkdir(parents=True)
+            (module_config_dir / "spark-telegram-bot.env").write_text(
+                "ADMIN_TELEGRAM_IDS=111\nTELEGRAM_GATEWAY_MODE=polling\nTELEGRAM_RELAY_SECRET=shared\n",
+                encoding="utf-8",
+            )
+            (module_config_dir / "spawner-ui.env").write_text(
+                "MISSION_CONTROL_WEBHOOK_URLS=http://127.0.0.1:8788/spawner-events\n",
+                encoding="utf-8",
+            )
+
+            class Args:
+                profile = "qa-bot"
+                bot_token = "bad-token"
+                admin_telegram_ids = "222"
+                telegram_relay_port = 8792
+                skip_telegram_token_check = False
+
+            with patch("spark_cli.cli.CONFIG_DIR", config_dir), \
+                 patch("spark_cli.cli.STATE_DIR", state_dir), \
+                 patch("spark_cli.cli.MODULE_CONFIG_DIR", module_config_dir), \
+                 patch("spark_cli.cli.CONFIG_PATH", state_dir / "setup.json"), \
+                 patch("spark_cli.cli.SECRETS_INDEX_PATH", config_dir / "secrets_index.json"), \
+                 patch("spark_cli.cli.SECRETS_FILE_PATH", config_dir / "secrets.local.json"), \
+                 patch("spark_cli.cli.keychain_available", return_value=False), \
+                 patch("spark_cli.cli.resolve_installed_modules", return_value={"spark-telegram-bot": bot, "spawner-ui": spawner}), \
+                 patch("spark_cli.cli.validate_telegram_bot_token", side_effect=SystemExit("Telegram rejected the bot token")):
+                store_secret("telegram.profiles.qa-bot.bot_token", "old-token", preferred="keychain")
+                with self.assertRaises(SystemExit):
+                    configure_telegram_profile(Args())
+                self.assertEqual(fetch_secret("telegram.profiles.qa-bot.bot_token"), "old-token")
+                self.assertFalse((module_config_dir / "spark-telegram-bot.qa-bot.env").exists())
 
     def test_describe_install_risk_lists_commands_and_hooks(self) -> None:
         module = Module(
@@ -1628,6 +1692,7 @@ class SparkCliTests(unittest.TestCase):
                     "--non-interactive",
                     "--skip-install-commands",
                     "--skip-runtime-check",
+                    "--skip-telegram-token-check",
                     "--secret",
                     "telegram.bot_token=123456:test-token",
                     "--secret",
@@ -3628,6 +3693,66 @@ class SparkCliTests(unittest.TestCase):
                 self.assertTrue(delete_secret("telegram.bot_token"))
                 self.assertIsNone(fetch_secret("telegram.bot_token"))
                 self.assertEqual(list_stored_secrets(), {})
+
+    def test_validate_telegram_bot_token_uses_getme_without_leaking_token_on_rejection(self) -> None:
+        class FakeResponse:
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"ok": true, "result": {"username": "spark_test_bot"}}'
+
+        with patch("spark_cli.cli.urllib.request.urlopen", return_value=FakeResponse()) as urlopen_mock:
+            result = validate_telegram_bot_token("123456:valid-token", secret_id="telegram.bot_token")
+
+        self.assertEqual(result["username"], "spark_test_bot")
+        self.assertIn("/bot123456:valid-token/getMe", urlopen_mock.call_args.args[0])
+
+        with patch(
+            "spark_cli.cli.urllib.request.urlopen",
+            side_effect=urllib.error.HTTPError(
+                "https://api.telegram.org/bot123456:bad-token/getMe",
+                401,
+                "Unauthorized",
+                {},
+                None,
+            ),
+        ):
+            with self.assertRaises(SystemExit) as error:
+                validate_telegram_bot_token("123456:bad-token", secret_id="telegram.bot_token")
+        self.assertIn("Telegram rejected the bot token", str(error.exception))
+        self.assertNotIn("123456:bad-token", str(error.exception))
+
+    def test_validate_new_telegram_bot_tokens_skips_unchanged_tokens_and_supports_offline_bypass(self) -> None:
+        class Args:
+            skip_telegram_token_check = False
+
+        class OfflineArgs:
+            skip_telegram_token_check = True
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            index_path = Path(tmp_dir) / "secrets_index.json"
+            file_path = Path(tmp_dir) / "secrets.local.json"
+            with patch("spark_cli.cli.SECRETS_INDEX_PATH", index_path), \
+                 patch("spark_cli.cli.SECRETS_FILE_PATH", file_path), \
+                 patch("spark_cli.cli.keychain_available", return_value=False):
+                store_secret("telegram.bot_token", "old-token", preferred="keychain")
+                with patch("spark_cli.cli.validate_telegram_bot_token") as validate_mock:
+                    validate_new_telegram_bot_tokens(
+                        Args(),
+                        {
+                            "telegram.bot_token": "old-token",
+                            "telegram.profiles.primary.bot_token": "new-token",
+                        },
+                    )
+                validate_mock.assert_called_once_with("new-token", secret_id="telegram.profiles.primary.bot_token")
+
+                with patch("spark_cli.cli.validate_telegram_bot_token") as validate_mock:
+                    validate_new_telegram_bot_tokens(OfflineArgs(), {"telegram.bot_token": "offline-token"})
+                validate_mock.assert_not_called()
 
     def test_keychain_secret_accounts_are_namespaced_by_spark_home(self) -> None:
         with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:

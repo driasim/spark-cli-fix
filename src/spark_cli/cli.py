@@ -66,6 +66,7 @@ PRIMARY_TELEGRAM_PROFILE_KEY = "primary_telegram_profile"
 TELEGRAM_PROFILE_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,38}[a-z0-9]$")
 AUTOSTART_TARGET_PATTERN = re.compile(r"^[a-z0-9-]+$")
 GIT_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
+TELEGRAM_BOT_TOKEN_TIMEOUT_SECONDS = 10
 
 try:  # keyring is an optional runtime dep; we degrade gracefully without it.
     import keyring as _keyring
@@ -561,6 +562,60 @@ def fetch_secret(secret_id: str) -> str | None:
         value = load_json(SECRETS_FILE_PATH, {}).get(secret_id)
         return dpapi_unprotect(value) if isinstance(value, str) else None
     return None
+
+
+def is_telegram_bot_token_secret(secret_id: str) -> bool:
+    return secret_id == "telegram.bot_token" or (
+        secret_id.startswith("telegram.profiles.") and secret_id.endswith(".bot_token")
+    )
+
+
+def validate_telegram_bot_token(token: str, *, secret_id: str = "telegram.bot_token") -> dict[str, Any]:
+    """Validate a Telegram bot token with getMe before persisting it."""
+    quoted_token = urllib.parse.quote(token, safe=":")
+    url = f"https://api.telegram.org/bot{quoted_token}/getMe"
+    try:
+        with urllib.request.urlopen(url, timeout=TELEGRAM_BOT_TOKEN_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        if error.code in {401, 404}:
+            raise SystemExit(
+                f"Telegram rejected the bot token for {secret_id}. Nothing was changed. "
+                "Open @BotFather, copy the token again, then rerun `spark setup --bot-token @clipboard`. "
+                "Use --skip-telegram-token-check only for offline development."
+            )
+        raise SystemExit(
+            f"Telegram token validation failed for {secret_id}: HTTP {error.code}. "
+            "Nothing was changed. Try again, or use --skip-telegram-token-check only for offline development."
+        )
+    except (OSError, TimeoutError, json.JSONDecodeError) as error:
+        raise SystemExit(
+            f"Telegram token validation could not reach Telegram for {secret_id}: {error.__class__.__name__}. "
+            "Nothing was changed. Check the network, then retry; use --skip-telegram-token-check only for offline development."
+        )
+    if not payload.get("ok"):
+        description = str(payload.get("description") or "token rejected")
+        raise SystemExit(
+            f"Telegram rejected the bot token for {secret_id}: {description}. Nothing was changed. "
+            "Open @BotFather, copy the token again, then rerun `spark setup --bot-token @clipboard`."
+        )
+    result = payload.get("result")
+    return result if isinstance(result, dict) else {}
+
+
+def validate_new_telegram_bot_tokens(args: argparse.Namespace, secret_values: dict[str, str]) -> None:
+    if getattr(args, "skip_telegram_token_check", False):
+        return
+    validated_values: set[str] = set()
+    for secret_id, token in sorted(secret_values.items()):
+        if not token or not is_telegram_bot_token_secret(secret_id):
+            continue
+        if fetch_secret(secret_id) == token:
+            continue
+        if token in validated_values:
+            continue
+        validate_telegram_bot_token(token, secret_id=secret_id)
+        validated_values.add(token)
 
 
 def delete_secret(secret_id: str) -> bool:
@@ -1919,6 +1974,9 @@ def configure_telegram_profile(args: argparse.Namespace) -> int:
         raise SystemExit(
             "Missing profile bot token. Pass --bot-token @clipboard or --bot-token @env:SPARK_TELEGRAM_BOT_TOKEN."
         )
+    profile_secret_id = telegram_profile_secret_id(profile, "bot_token")
+    if not getattr(args, "skip_telegram_token_check", False) and fetch_secret(profile_secret_id) != bot_token:
+        validate_telegram_bot_token(bot_token, secret_id=profile_secret_id)
 
     base_env = read_generated_env(generated_module_env_path(gateway))
     setup_state = load_json(CONFIG_PATH, {})
@@ -1938,7 +1996,7 @@ def configure_telegram_profile(args: argparse.Namespace) -> int:
     profile_env.pop("BOT_TOKEN", None)
 
     write_generated_env(generated_module_env_path(gateway, profile), profile_env)
-    backend = store_secret(telegram_profile_secret_id(profile, "bot_token"), bot_token, preferred="keychain")
+    backend = store_secret(profile_secret_id, bot_token, preferred="keychain")
 
     webhook_url = f"http://127.0.0.1:{relay_port}/spawner-events"
     append_spawner_webhook_url(spawner, webhook_url)
@@ -1952,7 +2010,7 @@ def configure_telegram_profile(args: argparse.Namespace) -> int:
         "env_file": str(generated_module_env_path(gateway, profile)),
         "relay_port": relay_port,
         "webhook_url": webhook_url,
-        "bot_token_secret": telegram_profile_secret_id(profile, "bot_token"),
+        "bot_token_secret": profile_secret_id,
         "admin_ids_configured": bool(profile_env.get("ADMIN_TELEGRAM_IDS")),
         "configured_at": timestamp_now(),
     }
@@ -1962,7 +2020,7 @@ def configure_telegram_profile(args: argparse.Namespace) -> int:
 
     print(f"Telegram profile configured: {profile}")
     print(f"Profile env: {generated_module_env_path(gateway, profile)}")
-    print(f"Secret {telegram_profile_secret_id(profile, 'bot_token')} -> {backend}")
+    print(f"Secret {profile_secret_id} -> {backend}")
     print(f"Spawner mission relay URL added: {webhook_url}")
     print("Start it with:")
     print(f"  spark start spark-telegram-bot --profile {profile}")
@@ -3050,6 +3108,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         plan.ingress_owner,
         interactive,
     )
+    validate_new_telegram_bot_tokens(args, secret_values)
     save_json(CONFIG_PATH, setup_state)
     install_setup_bundle(args, plan.bundle, plan.installed_modules)
     builder_notes, keychain_report = write_setup_runtime_config(
@@ -5724,6 +5783,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     setup_parser.add_argument("--secret", action="append", help="Provide manifest secret values as key=value; use @clipboard, @env:NAME, or @file:path for secret input")
     setup_parser.add_argument("--bot-token", help="Telegram BotFather token, @clipboard, @env:NAME, or @file:path")
+    setup_parser.add_argument(
+        "--skip-telegram-token-check",
+        action="store_true",
+        help="Skip live Telegram getMe token validation before saving a new bot token (offline/dev only)",
+    )
     setup_parser.add_argument("--admin-telegram-ids")
     setup_parser.add_argument("--telegram-relay-secret")
     setup_parser.add_argument("--telegram-relay-port", type=int, help="Local Telegram mission relay port for a named profile")
