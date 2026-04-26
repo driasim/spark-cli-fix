@@ -16,9 +16,13 @@ This tracker is the cross-repo source of truth for the April 26 hardening pass. 
 | Generated env linked-path protection | Done | Generated module env writes and cleanup now use the same linked-path guard plus write-boundary checks. |
 | Endpoint audit | Started | See `docs/ENDPOINT_AUDIT_2026-04-26.md`. Builder and Telegram local relay surfaces are documented with current auth posture. |
 | Per-request secret resolution | Checked | Builder Discord/WhatsApp webhook secrets resolve through `ConfigManager.read_env_map()` during request handling. CLI runtime envs resolve secrets at process launch; rotation still needs restart for long-lived child processes. |
+| Provider base URL overrides | Done | `domain-chip-memory` now validates OpenAI and MiniMax base URLs as HTTPS, credential-free, query/fragment-free URLs on known provider hosts before constructing clients. |
+| Researcher adapter subprocess config | Done | `spark-researcher` adapter env/CLI command overrides now validate executables against per-adapter allowlists. The generic adapter is disabled by default and requires an explicit executable allowlist. |
+| Module runtime shell execution | Done | `spark-cli` module hooks, healthchecks, ready checks, and process starts now parse runtime commands to argv and run without `shell=True`; supported runtime tools are allowlisted. |
 | Approval engine | Planned only | Sensitive-action approval policy is deliberately deferred. See `docs/APPROVAL_ENGINE_PLAN_2026-04-26.md` for scope, rollout phases, and test requirements before implementation. |
 | Docker sandbox | Deferred optional | Docker isolation should stay optional and additive. It should not be required for normal local Spark usage. |
 | T11 sustained-attack tier | Deferred | Do not focus implementation now, but keep spark-character structure compatible with adding the tier later. |
+| Dependency audit baseline | Checked | `spark-telegram-bot` `npm audit` and pip-audit checks for `spark-cli`, `domain-chip-memory`, `spark-researcher`, and `spark-character` reported no known vulnerabilities. `spark-agent-site` has no package manifest; do not attribute parent-directory npm findings to it. |
 
 ## Secret Verification Notes
 
@@ -41,6 +45,8 @@ Result:
 3. Turn provenance enforcement on gradually: first fail only missing commit pins, then warn on unsigned commits, then require attestations for blessed modules.
 4. Add narrow endpoint regression tests whenever a new HTTP listener or public route is introduced.
 5. Implement the approval engine only after the report-only classifier plan in `docs/APPROVAL_ENGINE_PLAN_2026-04-26.md` is reviewed.
+6. Add a standard SBOM/dependency audit command per repo so future audits do not depend on ad hoc local tooling.
+7. Restart long-lived Spark child processes after secret rotation so launch-time env resolution picks up new values.
 
 ## Gitleaks Scan - 2026-04-26
 
