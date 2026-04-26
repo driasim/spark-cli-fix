@@ -616,9 +616,9 @@ def stdout_is_tty() -> bool:
 def read_secret_interactive(prompt: str) -> str:
     """Read a secret from an interactive terminal.
 
-    Windows users get one asterisk per typed/pasted character so they can tell
-    input landed without exposing the value. Other terminals fall back to the
-    standard hidden getpass prompt.
+    Interactive Windows/POSIX terminals get one asterisk per typed/pasted
+    character so users can tell input landed without exposing the value. Weird
+    terminals fall back to the standard hidden getpass prompt.
     """
     if sys.platform == "win32" and stdin_is_tty() and stdout_is_tty():
         import msvcrt
@@ -648,6 +648,44 @@ def read_secret_interactive(prompt: str) -> str:
             chars.append(char)
             sys.stdout.write("*")
             sys.stdout.flush()
+    if sys.platform != "win32" and stdin_is_tty() and stdout_is_tty():
+        try:
+            import termios
+            import tty
+
+            fd = sys.stdin.fileno()
+        except (AttributeError, ImportError, OSError):
+            return getpass.getpass(prompt)
+        try:
+            original_attrs = termios.tcgetattr(fd)
+        except termios.error:
+            return getpass.getpass(prompt)
+        chars: list[str] = []
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        try:
+            tty.setcbreak(fd)
+            while True:
+                char = sys.stdin.read(1)
+                if char in {"", "\x04"}:
+                    raise EOFError
+                if char in {"\r", "\n"}:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    return "".join(chars)
+                if char == "\x03":
+                    raise KeyboardInterrupt
+                if char in {"\b", "\x7f"}:
+                    if chars:
+                        chars.pop()
+                        sys.stdout.write("\b \b")
+                        sys.stdout.flush()
+                    continue
+                chars.append(char)
+                sys.stdout.write("*")
+                sys.stdout.flush()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, original_attrs)
     return getpass.getpass(prompt)
 
 

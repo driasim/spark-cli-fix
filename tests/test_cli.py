@@ -2937,6 +2937,48 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(value, "ac")
         self.assertEqual(output.getvalue(), "Paste secret: **\b \b*\n")
 
+    def test_read_secret_interactive_masks_posix_terminal_input(self) -> None:
+        chars = iter(["a", "b", "\x7f", "c", "\n"])
+
+        class FakeStdin:
+            def fileno(self) -> int:
+                return 10
+
+            def read(self, _: int) -> str:
+                return next(chars)
+
+        calls: list[tuple[str, int, object | None]] = []
+
+        class FakeTermios:
+            TCSADRAIN = 1
+            error = OSError
+
+            @staticmethod
+            def tcgetattr(fd: int) -> list[int]:
+                calls.append(("get", fd, None))
+                return [1, 2, 3]
+
+            @staticmethod
+            def tcsetattr(fd: int, when: int, attrs: object) -> None:
+                calls.append(("set", fd, attrs))
+
+        class FakeTty:
+            @staticmethod
+            def setcbreak(fd: int) -> None:
+                calls.append(("cbreak", fd, None))
+
+        output = StringIO()
+        with patch("spark_cli.cli.sys.platform", "linux"), \
+             patch("spark_cli.cli.stdin_is_tty", return_value=True), \
+             patch("spark_cli.cli.stdout_is_tty", return_value=True), \
+             patch("spark_cli.cli.sys.stdin", FakeStdin()), \
+             patch.dict(sys.modules, {"termios": FakeTermios, "tty": FakeTty}), \
+             patch("sys.stdout", output):
+            value = read_secret_interactive("Paste secret: ")
+        self.assertEqual(value, "ac")
+        self.assertEqual(output.getvalue(), "Paste secret: **\b \b*\n")
+        self.assertEqual(calls[-1], ("set", 10, [1, 2, 3]))
+
     def test_cmd_secrets_set_resolves_clipboard_sentinel(self) -> None:
         args = build_parser().parse_args(["secrets", "set", "llm.zai.api_key", "--value", "@clipboard", "--backend", "file"])
         with tempfile.TemporaryDirectory() as tmp_dir:
