@@ -18,6 +18,7 @@ from spark_cli.cli import (
     append_process_log,
     atomic_write_json,
     build_module_repair_hints,
+    build_llm_env,
     build_parser,
     build_status_repair_hints,
     build_module_envs,
@@ -110,6 +111,7 @@ from spark_cli.cli import (
     redact_for_llm,
     redact_shareable_text,
     redact_sensitive_text,
+    non_secret_llm_env,
     read_clipboard_text,
     read_secret_interactive,
     resolve_secret_input,
@@ -149,6 +151,7 @@ from spark_cli.cli import (
     prompt_for_secret,
     ready_timeout_seconds,
     read_generated_env,
+    resolve_llm_provider,
     resolve_llm_roles,
     resolve_llm_doctor_target,
     render_upstream_pr_candidate,
@@ -1385,19 +1388,70 @@ class SparkCliTests(unittest.TestCase):
                 "setup",
                 "--non-interactive",
                 "--chat-llm-provider",
-                "zai",
+                "openrouter",
                 "--builder-llm-provider",
                 "openai",
                 "--memory-llm-provider",
-                "ollama",
+                "huggingface",
                 "--mission-llm-provider",
                 "minimax",
             ]
         )
-        self.assertEqual(args.chat_llm_provider, "zai")
+        self.assertEqual(args.chat_llm_provider, "openrouter")
         self.assertEqual(args.builder_llm_provider, "openai")
-        self.assertEqual(args.memory_llm_provider, "ollama")
+        self.assertEqual(args.memory_llm_provider, "huggingface")
         self.assertEqual(args.mission_llm_provider, "minimax")
+
+    def test_resolve_llm_provider_does_not_infer_from_stored_secret_keys(self) -> None:
+        args = build_parser().parse_args(["setup", "--non-interactive"])
+        with patch("spark_cli.cli.load_json", return_value={}):
+            provider = resolve_llm_provider(args, {"llm.ollama.api_key": "old", "llm.zai.api_key": "old-zai"})
+        self.assertEqual(provider, "not_configured")
+
+    def test_resolve_llm_provider_preserves_existing_setup_choice(self) -> None:
+        args = build_parser().parse_args(["setup", "--non-interactive"])
+        with patch("spark_cli.cli.load_json", return_value={"llm": {"provider": "openrouter"}}):
+            provider = resolve_llm_provider(args, {"llm.zai.api_key": "old-zai"})
+        self.assertEqual(provider, "openrouter")
+
+    def test_resolve_llm_provider_infers_current_explicit_key_arg(self) -> None:
+        args = build_parser().parse_args(["setup", "--non-interactive", "--openrouter-api-key", "@env:OPENROUTER_API_KEY"])
+        with patch("spark_cli.cli.load_json", return_value={}):
+            provider = resolve_llm_provider(args, {})
+        self.assertEqual(provider, "openrouter")
+
+    def test_non_secret_llm_env_removes_token_named_provider_secrets(self) -> None:
+        metadata = non_secret_llm_env(
+            {
+                "HF_TOKEN": "hf-secret",
+                "OPENROUTER_API_KEY": "or-secret",
+                "TELEGRAM_RELAY_SECRET": "relay-secret",
+                "SPARK_CHAT_LLM_PROVIDER": "huggingface",
+                "HUGGINGFACE_MODEL": "deepseek-ai/DeepSeek-R1:fastest",
+            }
+        )
+        self.assertNotIn("HF_TOKEN", metadata)
+        self.assertNotIn("OPENROUTER_API_KEY", metadata)
+        self.assertNotIn("TELEGRAM_RELAY_SECRET", metadata)
+        self.assertEqual(metadata["SPARK_CHAT_LLM_PROVIDER"], "huggingface")
+        self.assertEqual(metadata["HUGGINGFACE_MODEL"], "deepseek-ai/DeepSeek-R1:fastest")
+
+    def test_build_llm_env_only_exports_selected_provider_secrets(self) -> None:
+        args = build_parser().parse_args(["setup", "--non-interactive", "--llm-provider", "openrouter"])
+        provider, env = build_llm_env(
+            args,
+            {
+                "llm.openrouter.api_key": "or-secret",
+                "llm.zai.api_key": "old-zai",
+                "llm.minimax.api_key": "old-minimax",
+                "llm.huggingface.api_key": "old-hf",
+            },
+        )
+        self.assertEqual(provider, "openrouter")
+        self.assertEqual(env["OPENROUTER_API_KEY"], "or-secret")
+        self.assertNotIn("ZAI_API_KEY", env)
+        self.assertNotIn("MINIMAX_API_KEY", env)
+        self.assertNotIn("HF_TOKEN", env)
 
     def test_resolve_llm_roles_defaults_chat_api_missions_to_codex_executor(self) -> None:
         args = build_parser().parse_args(["setup", "--non-interactive", "--llm-provider", "zai"])
@@ -4650,7 +4704,7 @@ class SparkCliTests(unittest.TestCase):
             [],
             {"llm": {"provider": "zai", "api_key_configured": False}},
         )
-        self.assertIn("LLM provider uses Z.AI but is missing an API key. Re-run `spark setup --llm-provider zai --zai-api-key <key>`.", hints)
+        self.assertIn("LLM provider uses Z.AI / GLM coding endpoint but is missing an API key. Re-run `spark setup --llm-provider zai --zai-api-key <key>`.", hints)
 
     def test_build_status_repair_hints_reports_missing_starter_runtime_process(self) -> None:
         spawner = Module(
@@ -4730,7 +4784,7 @@ class SparkCliTests(unittest.TestCase):
             hints,
         )
         self.assertIn(
-            "LLM role `chat` is not configured. Run `spark setup --chat-llm-provider openai` to use Codex/OpenAI, or choose anthropic, zai, minimax, ollama, or codex.",
+            "LLM role `chat` is not configured. Run `spark setup --chat-llm-provider openai` to use Codex/OpenAI, or choose anthropic, openrouter, zai, minimax, huggingface, ollama, or codex.",
             hints,
         )
 
@@ -4854,7 +4908,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertTrue(payload["roles"]["memory"]["ready"])
         self.assertFalse(payload["roles"]["mission"]["ready"])
         self.assertIn(
-            "LLM role `mission` is not configured. Run `spark setup --mission-llm-provider openai` to use Codex/OpenAI, or choose anthropic, zai, minimax, ollama, or codex.",
+            "LLM role `mission` is not configured. Run `spark setup --mission-llm-provider openai` to use Codex/OpenAI, or choose anthropic, openrouter, zai, minimax, huggingface, ollama, or codex.",
             payload["repair_hints"],
         )
 

@@ -1315,6 +1315,8 @@ def collect_secret_values(
         "llm.zai.api_key": getattr(args, "zai_api_key", None),
         "llm.openai.api_key": getattr(args, "openai_api_key", None),
         "llm.anthropic.api_key": getattr(args, "anthropic_api_key", None),
+        "llm.openrouter.api_key": getattr(args, "openrouter_api_key", None),
+        "llm.huggingface.api_key": getattr(args, "huggingface_api_key", None),
         "llm.minimax.api_key": getattr(args, "minimax_api_key", None),
     }
     for key, value in legacy_map.items():
@@ -1978,6 +1980,28 @@ def module_runtime_env(module: Module, profile: str | None = None) -> dict[str, 
 
 
 LLM_PROVIDER_ENV: dict[str, dict[str, str]] = {
+    "openrouter": {
+        "api_key_secret": "llm.openrouter.api_key",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "base_url_arg": "openrouter_base_url",
+        "base_url_env": "OPENROUTER_BASE_URL",
+        "base_url_default": "https://openrouter.ai/api/v1",
+        "model_arg": "openrouter_model",
+        "model_env": "OPENROUTER_MODEL",
+        "model_default": "openai/gpt-5.5",
+        "bot_provider": "openrouter",
+    },
+    "huggingface": {
+        "api_key_secret": "llm.huggingface.api_key",
+        "api_key_env": "HF_TOKEN",
+        "base_url_arg": "huggingface_base_url",
+        "base_url_env": "HUGGINGFACE_BASE_URL",
+        "base_url_default": "https://router.huggingface.co/v1",
+        "model_arg": "huggingface_model",
+        "model_env": "HUGGINGFACE_MODEL",
+        "model_default": "deepseek-ai/DeepSeek-R1:fastest",
+        "bot_provider": "huggingface",
+    },
     "zai": {
         "api_key_secret": "llm.zai.api_key",
         "api_key_env": "ZAI_API_KEY",
@@ -2047,7 +2071,7 @@ LLM_PROVIDER_ENV: dict[str, dict[str, str]] = {
 
 LLM_PROVIDER_CHOICES = sorted(provider for provider in LLM_PROVIDER_ENV if provider != "not_configured")
 LLM_ROLES = ("chat", "builder", "memory", "mission")
-LLM_PROVIDER_WIZARD_ORDER = ("openai", "codex", "anthropic", "zai", "minimax", "ollama")
+LLM_PROVIDER_WIZARD_ORDER = ("openai", "codex", "anthropic", "openrouter", "zai", "minimax", "huggingface", "ollama")
 LLM_ROLE_LABELS = {
     "chat": "Telegram chat replies",
     "builder": "Builder reasoning",
@@ -2058,6 +2082,8 @@ LLM_PROVIDER_LABELS = {
     "openai": "OpenAI / OpenAI-compatible",
     "codex": "Codex CLI / ChatGPT sign-in",
     "anthropic": "Anthropic / Claude",
+    "openrouter": "OpenRouter",
+    "huggingface": "Hugging Face router",
     "zai": "Z.AI / GLM coding endpoint",
     "minimax": "MiniMax",
     "ollama": "Ollama local",
@@ -2066,6 +2092,8 @@ LLM_PROVIDER_AUTH_HINTS = {
     "openai": "signed-in Codex CLI, OPENAI_API_KEY, or local OpenAI-compatible server",
     "codex": "signed-in Codex CLI",
     "anthropic": "Claude Code sign-in or ANTHROPIC_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "huggingface": "HF_TOKEN",
     "zai": "ZAI_API_KEY",
     "minimax": "MINIMAX_API_KEY",
     "ollama": "local Ollama server",
@@ -2084,6 +2112,10 @@ def describe_llm_provider_setup(provider: str) -> str:
         status = "Claude Code detected" if detect_claude_code()["present"] else "use ANTHROPIC_API_KEY or run `claude` to sign in"
     elif provider == "ollama":
         status = "local Ollama server"
+    elif provider == "openrouter":
+        status = "unified OpenAI-compatible model gateway"
+    elif provider == "huggingface":
+        status = "Hugging Face OpenAI-compatible chat router"
     elif provider == "zai":
         status = "uses the GLM coding endpoint API key"
     elif provider == "minimax":
@@ -2098,7 +2130,7 @@ def setup_has_llm_provider_selection(args: argparse.Namespace) -> bool:
 
 
 def provider_requires_wizard_api_key(provider: str) -> bool:
-    if provider in {"zai", "minimax"}:
+    if provider in {"zai", "minimax", "openrouter", "huggingface"}:
         return True
     if provider == "openai":
         return not detect_codex_cli()["present"]
@@ -2149,7 +2181,7 @@ def collect_provider_api_keys(providers: list[str], secret_values: dict[str, str
         hint = LLM_PROVIDER_AUTH_HINTS.get(provider, "API key")
         print(f"")
         print(f"{label} needs {hint} for this setup.")
-        if provider in {"zai", "minimax"}:
+        if provider in {"zai", "minimax", "openrouter", "huggingface"}:
             print(f"  Endpoint: {spec['base_url_default']}")
             print(f"  Model: {spec['model_default']} (override with --{provider}-model if needed)")
         value = prompt_for_secret(
@@ -2166,8 +2198,6 @@ def collect_provider_api_keys(providers: list[str], secret_values: dict[str, str
 
 def run_llm_provider_wizard(args: argparse.Namespace, secret_values: dict[str, str]) -> dict[str, str]:
     if setup_has_llm_provider_selection(args):
-        return collect_provider_api_keys(selected_llm_providers(args, secret_values), secret_values)
-    if resolve_llm_provider(args, secret_values) != "not_configured":
         return collect_provider_api_keys(selected_llm_providers(args, secret_values), secret_values)
     print("")
     print("Choose your chat brain")
@@ -2217,10 +2247,20 @@ def resolve_llm_provider(args: argparse.Namespace, secret_values: dict[str, str]
     requested = getattr(args, "llm_provider", None)
     if requested:
         return str(requested)
-    for provider, spec in LLM_PROVIDER_ENV.items():
-        secret_id = spec.get("api_key_secret")
-        if secret_id and secret_values.get(secret_id):
-            return provider
+    explicit_key_providers = [
+        provider
+        for provider, spec in LLM_PROVIDER_ENV.items()
+        if provider != "not_configured"
+        and spec.get("api_key_secret")
+        and getattr(args, str(spec.get("api_key_secret")).split(".")[1] + "_api_key", None)
+    ]
+    if len(explicit_key_providers) == 1:
+        return explicit_key_providers[0]
+    existing_setup = load_json(CONFIG_PATH, {})
+    existing_llm = existing_setup.get("llm") if isinstance(existing_setup, dict) else None
+    existing_provider = existing_llm.get("provider") if isinstance(existing_llm, dict) else None
+    if existing_provider in LLM_PROVIDER_CHOICES:
+        return str(existing_provider)
     return "not_configured"
 
 
@@ -2296,13 +2336,16 @@ def build_llm_env(args: argparse.Namespace, secret_values: dict[str, str]) -> tu
         "BOT_DEFAULT_PROVIDER": spec["bot_provider"],
     }
 
-    for provider_name, provider_spec in LLM_PROVIDER_ENV.items():
+    selected_provider_names = sorted(set(roles.values()))
+
+    for provider_name in selected_provider_names:
+        provider_spec = LLM_PROVIDER_ENV[provider_name]
         api_key_secret = provider_spec.get("api_key_secret")
         api_key_env = provider_spec.get("api_key_env")
         if api_key_secret and api_key_env and secret_values.get(api_key_secret):
             env[api_key_env] = secret_values[api_key_secret]
 
-    for provider_name in sorted(set(roles.values())):
+    for provider_name in selected_provider_names:
         provider_spec = LLM_PROVIDER_ENV[provider_name]
         if provider_name == "not_configured":
             continue
@@ -2333,7 +2376,7 @@ def non_secret_llm_env(llm_env: dict[str, str]) -> dict[str, str]:
     return {
         key: value
         for key, value in llm_env.items()
-        if not key.endswith("_API_KEY") and key not in {"ZAI_API_KEY", "ANTHROPIC_API_KEY"}
+        if not any(secret_marker in key.upper() for secret_marker in ("API_KEY", "TOKEN", "SECRET", "PASSWORD"))
     }
 
 
@@ -3518,19 +3561,16 @@ def build_llm_repair_hints(llm_state: dict[str, Any], *, secret_keys: set[str] |
         role_flag = "--llm-provider" if role == "all" else f"--{role}-llm-provider"
         if provider == "not_configured":
             hints.append(
-                f"{role_label} is not configured. Run `spark setup {role_flag} openai` to use Codex/OpenAI, or choose anthropic, zai, minimax, ollama, or codex."
+                f"{role_label} is not configured. Run `spark setup {role_flag} openai` to use Codex/OpenAI, or choose anthropic, openrouter, zai, minimax, huggingface, ollama, or codex."
             )
-        elif provider == "zai" and auth_mode == "not_configured":
+        elif provider in {"zai", "minimax", "openrouter", "huggingface"} and auth_mode == "not_configured":
+            label = LLM_PROVIDER_LABELS.get(provider, provider)
             hints.append(
-                f"{role_label} uses Z.AI but is missing an API key. Re-run `spark setup {role_flag} zai --zai-api-key <key>`."
+                f"{role_label} uses {label} but is missing an API key. Re-run `spark setup {role_flag} {provider} --{provider}-api-key <key>`."
             )
         elif provider == "anthropic" and auth_mode == "not_configured":
             hints.append(
                 f"{role_label} uses Anthropic but neither Claude Code nor ANTHROPIC_API_KEY is configured. Run `claude` to sign in, or rerun `spark setup {role_flag} anthropic --anthropic-api-key <key>`."
-            )
-        elif provider == "minimax" and auth_mode == "not_configured":
-            hints.append(
-                f"{role_label} uses MiniMax but is missing an API key. Re-run `spark setup {role_flag} minimax --minimax-api-key <key>`."
             )
         elif provider == "openai" and auth_mode == "not_configured" and openai_base_url_kind(str(state.get("base_url") or llm_state.get("base_url") or "")) == "remote_custom":
             hints.append(
@@ -3676,6 +3716,7 @@ def print_setup_next_steps(bundle_name: str, ingress_owner: Module, llm_state: d
     print(f"     spark setup {bundle_name}")
     print("Need to choose or change LLMs? Run `spark setup` for the guided picker, or use role flags for automation.")
     print("OpenAI can use a signed-in Codex/ChatGPT session (`codex`) or OPENAI_API_KEY; Anthropic can use Claude Code (`claude`) or ANTHROPIC_API_KEY.")
+    print("OpenRouter, Z.AI, MiniMax, and Hugging Face use API keys; Ollama and LM Studio-style local servers stay local.")
     print("For role-level control, use --chat-llm-provider, --builder-llm-provider, --memory-llm-provider, and --mission-llm-provider.")
     print("Need to turn the agent off? Run `spark stop telegram-starter` or `spark autostart uninstall`.")
     print("Run `spark guide` anytime for BotFather, LLM, access levels, module, and Telegram command help.")
@@ -4245,7 +4286,7 @@ def resolve_llm_doctor_target(args: argparse.Namespace) -> dict[str, Any]:
         model = str(getattr(args, "model", None) or state.get("model") or spec.get("model_default") or "")
         base_url = str(getattr(args, "base_url", None) or state.get("base_url") or spec.get("base_url_default") or "")
         auth_mode = str(state.get("auth_mode") or "not_configured")
-        if provider in {"openai", "zai", "minimax"}:
+        if provider in {"openai", "zai", "minimax", "openrouter", "huggingface"}:
             secret_id = spec.get("api_key_secret")
             api_key = fetch_secret(str(secret_id)) if secret_id else None
             if api_key:
@@ -4274,7 +4315,7 @@ def resolve_llm_doctor_target(args: argparse.Namespace) -> dict[str, Any]:
                 "auth_mode": auth_mode,
                 "unsupported": True,
             }
-    raise SystemExit("No directly callable LLM provider is configured for Spark Doctor. Run `spark setup` and choose OpenAI, Z.AI, MiniMax, or Ollama for chat/builder.")
+    raise SystemExit("No directly callable LLM provider is configured for Spark Doctor. Run `spark setup` and choose OpenAI, OpenRouter, Z.AI, MiniMax, Hugging Face, or Ollama for chat/builder.")
 
 
 def openai_compatible_chat_completion(target: dict[str, Any], prompt: str) -> str:
@@ -4341,10 +4382,10 @@ def call_llm_doctor(target: dict[str, Any], prompt: str) -> str:
         provider = target.get("provider")
         raise SystemExit(
             f"Spark Doctor cannot directly call {provider} via {target.get('auth_mode')} yet. "
-            "Use --prompt-out to review the redacted prompt, or configure OpenAI/Z.AI/MiniMax/Ollama."
+            "Use --prompt-out to review the redacted prompt, or configure OpenAI/OpenRouter/Z.AI/MiniMax/Hugging Face/Ollama."
         )
     provider = target["provider"]
-    if provider in {"openai", "zai", "minimax"}:
+    if provider in {"openai", "zai", "minimax", "openrouter", "huggingface"}:
         return openai_compatible_chat_completion(target, prompt)
     if provider == "ollama":
         return ollama_chat_completion(target, prompt)
@@ -4618,12 +4659,28 @@ def provider_catalog_payload() -> dict[str, Any]:
                 "setup": "spark setup --llm-provider anthropic",
             },
             {
+                "id": "openrouter",
+                "label": "OpenRouter",
+                "auth": ["api_key"],
+                "oauth_available": False,
+                "recommended_for": ["chat", "builder", "memory"],
+                "setup": "spark setup --llm-provider openrouter --openrouter-api-key <key> --openrouter-model <model>",
+            },
+            {
                 "id": "zai",
                 "label": "Z.AI / GLM",
                 "auth": ["api_key"],
                 "oauth_available": False,
                 "recommended_for": ["chat", "builder", "mission"],
                 "setup": "spark setup --llm-provider zai --zai-api-key <key>",
+            },
+            {
+                "id": "huggingface",
+                "label": "Hugging Face",
+                "auth": ["api_key"],
+                "oauth_available": False,
+                "recommended_for": ["chat", "builder", "memory"],
+                "setup": "spark setup --llm-provider huggingface --huggingface-api-key <key> --huggingface-model <model>",
             },
             {
                 "id": "minimax",
@@ -6724,12 +6781,14 @@ def onboarding_guide_payload() -> dict[str, Any]:
                 "spark setup --llm-provider openai --openai-base-url http://localhost:1234/v1 --openai-model <LM_STUDIO_MODEL>",
                 "spark setup --llm-provider anthropic",
                 "spark setup --llm-provider anthropic --anthropic-api-key <ANTHROPIC_API_KEY>",
+                "spark setup --llm-provider openrouter --openrouter-api-key <OPENROUTER_API_KEY> --openrouter-model <MODEL>",
                 "spark setup --llm-provider zai --zai-api-key <ZAI_API_KEY>",
                 "spark setup --llm-provider minimax --minimax-api-key <MINIMAX_API_KEY>",
+                "spark setup --llm-provider huggingface --huggingface-api-key <HF_TOKEN> --huggingface-model <MODEL>",
                 "spark setup --llm-provider ollama --ollama-url http://localhost:11434 --ollama-model <MODEL>",
                 "spark setup --chat-llm-provider openai --builder-llm-provider openai --memory-llm-provider ollama --mission-llm-provider minimax",
             ],
-            "llm_auth_note": "The easiest path is `spark setup` and the guided picker. OpenAI can use a signed-in Codex CLI / ChatGPT session, OPENAI_API_KEY, or an OpenAI-compatible local server such as LM Studio with --openai-base-url. Anthropic can use Claude Code or ANTHROPIC_API_KEY. Z.AI and MiniMax use API keys. Ollama is local. If your default chat LLM is not a local executor, Spark uses Codex or Claude for mission/build execution when available.",
+            "llm_auth_note": "The easiest path is `spark setup` and the guided picker. OpenAI can use a signed-in Codex CLI / ChatGPT session, OPENAI_API_KEY, or an OpenAI-compatible local server such as LM Studio with --openai-base-url. Anthropic can use Claude Code or ANTHROPIC_API_KEY. OpenRouter, Z.AI, MiniMax, and Hugging Face use API keys. Ollama is local. If your default chat LLM is not a local executor, Spark uses Codex or Claude for mission/build execution when available.",
         },
         "start": [
             "spark autostart install --now",
@@ -6909,6 +6968,12 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--anthropic-api-key", help="Anthropic API key, @clipboard, @env:NAME, or @file:path")
     setup_parser.add_argument("--anthropic-base-url", default="https://api.anthropic.com")
     setup_parser.add_argument("--anthropic-model", default="claude-sonnet-4.5")
+    setup_parser.add_argument("--openrouter-api-key", help="OpenRouter API key, @clipboard, @env:NAME, or @file:path")
+    setup_parser.add_argument("--openrouter-base-url", default="https://openrouter.ai/api/v1")
+    setup_parser.add_argument("--openrouter-model", default="openai/gpt-5.5")
+    setup_parser.add_argument("--huggingface-api-key", help="Hugging Face token, @clipboard, @env:NAME, or @file:path")
+    setup_parser.add_argument("--huggingface-base-url", default="https://router.huggingface.co/v1")
+    setup_parser.add_argument("--huggingface-model", default="deepseek-ai/DeepSeek-R1:fastest")
     setup_parser.add_argument("--minimax-api-key", help="MiniMax API key, @clipboard, @env:NAME, or @file:path")
     setup_parser.add_argument("--minimax-base-url", default="https://api.minimax.io/v1")
     setup_parser.add_argument("--minimax-model", default="MiniMax-M2.7")

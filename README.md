@@ -135,8 +135,10 @@ Provider options:
 | OpenAI | Sign in with `codex`, then run `spark setup --llm-provider openai` | `spark setup --llm-provider openai --openai-api-key <OPENAI_API_KEY>` |
 | Codex CLI | Sign in with `codex`, then run `spark setup --llm-provider codex` | Uses the signed-in Codex CLI, no API key flag |
 | Anthropic | Sign in with `claude`, then run `spark setup --llm-provider anthropic` | `spark setup --llm-provider anthropic --anthropic-api-key <ANTHROPIC_API_KEY>` |
+| OpenRouter | Use an OpenRouter key and model id | `spark setup --llm-provider openrouter --openrouter-api-key <OPENROUTER_API_KEY> --openrouter-model <MODEL>` |
 | Z.AI / GLM | Use the coding endpoint key | `spark setup --llm-provider zai --zai-api-key <ZAI_API_KEY>` |
 | MiniMax | Use a MiniMax API key | `spark setup --llm-provider minimax --minimax-api-key <MINIMAX_API_KEY>` |
+| Hugging Face router | Use a Hugging Face token and chat model id | `spark setup --llm-provider huggingface --huggingface-api-key <HF_TOKEN> --huggingface-model <MODEL>` |
 | Ollama | Start Ollama locally | `spark setup --llm-provider ollama --ollama-url http://localhost:11434 --ollama-model <MODEL>` |
 
 If your terminal will not paste secrets, copy the key normally and type `@clipboard` instead of the key:
