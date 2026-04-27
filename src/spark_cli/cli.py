@@ -165,6 +165,12 @@ CHIP_SCAN_SKIP_FILES = {
     "uv.lock",
     "yarn.lock",
 }
+CHIP_SCAN_FIXTURE_DIRS = {
+    "__tests__",
+    "fixtures",
+    "test",
+    "tests",
+}
 CHIP_SCAN_TEXT_SUFFIXES = {
     "",
     ".bat",
@@ -3157,6 +3163,22 @@ def chip_scan_text(path_label: str, text: str) -> list[ChipScanFinding]:
     return findings
 
 
+def chip_scan_is_fixture_path(path_label: str) -> bool:
+    parts = {part.lower() for part in Path(path_label).parts}
+    return bool(parts & CHIP_SCAN_FIXTURE_DIRS)
+
+
+def normalize_fixture_finding(finding: ChipScanFinding) -> ChipScanFinding:
+    if finding.category in {"embedded-private-key"} and chip_scan_is_fixture_path(finding.path):
+        return ChipScanFinding(
+            finding.category,
+            "low",
+            finding.path,
+            f"{finding.detail}; appears in test/fixture code and is not installed as runtime secret material",
+        )
+    return finding
+
+
 def chip_scan_file(root: Path, path: Path) -> list[ChipScanFinding]:
     relative = chip_scan_relative_path(root, path)
     suffix = path.suffix.lower()
@@ -3178,7 +3200,7 @@ def chip_scan_file(root: Path, path: Path) -> list[ChipScanFinding]:
     if b"\0" in data:
         return findings
     text = data.decode("utf-8", errors="replace")
-    return [*findings, *chip_scan_text(relative, text)]
+    return [normalize_fixture_finding(finding) for finding in [*findings, *chip_scan_text(relative, text)]]
 
 
 def scan_module_trust(module: Module, *, trust_tier: str | None = None) -> list[ChipScanFinding]:

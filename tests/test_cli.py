@@ -146,6 +146,7 @@ from spark_cli.cli import (
     SPARK_HOME,
     STATE_DIR,
     capability_providers,
+    chip_scan_blocks_tier,
     detect_uninstall_blockers,
     detect_capability_conflicts,
     detect_ingress_owner,
@@ -979,6 +980,28 @@ class SparkCliTests(unittest.TestCase):
             )
             findings = scan_module_trust(module, trust_tier="community")
         self.assertTrue(any(finding.category == "embedded-private-key" for finding in findings))
+
+    def test_scan_module_trust_downgrades_private_key_redaction_fixtures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module_path = Path(tmp_dir)
+            tests_dir = module_path / "tests"
+            tests_dir.mkdir()
+            (module_path / "spark.toml").write_text("[module]\nname = \"thirdparty\"\n", encoding="utf-8")
+            (tests_dir / "redaction.test.ts").write_text(
+                "redactText('-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----')\n",
+                encoding="utf-8",
+            )
+            module = Module(
+                name="thirdparty",
+                path=module_path,
+                manifest={"module": {"name": "thirdparty", "version": "0.1.0", "kind": "service", "plane": "execution"}},
+            )
+            findings = scan_module_trust(module, trust_tier="trusted")
+
+        private_key_findings = [finding for finding in findings if finding.category == "embedded-private-key"]
+        self.assertEqual(len(private_key_findings), 1)
+        self.assertEqual(private_key_findings[0].severity, "low")
+        self.assertFalse(any(chip_scan_blocks_tier(finding.severity, "trusted") for finding in private_key_findings))
 
     def test_enforce_module_trust_scan_blocks_community_bootstrap_pipe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
