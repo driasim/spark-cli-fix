@@ -4254,7 +4254,7 @@ def follow_live_logs(*, lines: int = 80) -> None:
             print(f"No logs yet at {path}")
             positions[path] = 0
             continue
-        initial = tail_log_lines(path, lines)
+        initial = initial_follow_log_lines(path, lines)
         for line in initial:
             write_console_text(f"[{label}] {line if line.endswith(chr(10)) else line + chr(10)}")
         positions[path] = path.stat().st_size
@@ -4273,6 +4273,12 @@ def follow_live_logs(*, lines: int = 80) -> None:
             time.sleep(0.5)
     except KeyboardInterrupt:
         print("\nStopped watching Spark Live logs. Services are still running.")
+
+
+def initial_follow_log_lines(path: Path, line_count: int) -> list[str]:
+    if line_count == 0:
+        return []
+    return tail_log_lines(path, line_count)
 
 
 def cmd_live_status(args: argparse.Namespace) -> int:
@@ -7324,7 +7330,13 @@ def build_parser() -> argparse.ArgumentParser:
     live_start_parser = live_subparsers.add_parser("start", help="Start Spark Live")
     live_start_parser.set_defaults(func=cmd_live)
     live_run_parser = live_subparsers.add_parser("run", help="Start Spark Live and keep one combined log console open")
-    live_run_parser.add_argument("-n", "--lines", type=int, default=80, help="Lines of history to show before following")
+    live_run_parser.add_argument(
+        "-n",
+        "--lines",
+        type=int,
+        default=80,
+        help="Lines of history to show before following (0 = new lines only)",
+    )
     live_run_parser.set_defaults(func=cmd_live)
     live_restart_parser = live_subparsers.add_parser("restart", help="Restart Spark Live")
     live_restart_parser.set_defaults(func=cmd_live)

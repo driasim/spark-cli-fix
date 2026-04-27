@@ -50,6 +50,7 @@ from spark_cli.cli import (
     delete_secret,
     fetch_secret,
     infer_module_name_from_url,
+    initial_follow_log_lines,
     initialize_builder_runtime_home,
     install_command_argv,
     installer_manifest_payload,
@@ -2640,6 +2641,14 @@ class SparkCliTests(unittest.TestCase):
         live_args = start.call_args.args[0]
         self.assertEqual(live_args.target, "telegram-starter")
         follow.assert_called_once_with(lines=5)
+
+    def test_live_follow_zero_lines_starts_at_new_output_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / "spark.log"
+            log_path.write_text("old line 1\nold line 2\n", encoding="utf-8")
+
+            self.assertEqual(initial_follow_log_lines(log_path, 0), [])
+            self.assertEqual(initial_follow_log_lines(log_path, 1), ["old line 2\n"])
 
     def test_live_log_targets_include_named_telegram_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir, \
