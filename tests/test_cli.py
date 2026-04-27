@@ -107,6 +107,7 @@ from spark_cli.cli import (
     setup_should_run_install_commands,
     step_previously_completed,
     manifest_schema_version,
+    manual_telegram_profiles,
     needs_capabilities,
     parse_secret_pairs,
     parse_version_constraint,
@@ -1758,6 +1759,29 @@ class SparkCliTests(unittest.TestCase):
 
         with patch("spark_cli.cli.load_json", return_value=setup_state):
             self.assertEqual(autostart_telegram_profiles(), ["spark-agi"])
+
+    def test_autostart_profile_command_toggles_named_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "setup.json"
+            save_json(
+                config_path,
+                {
+                    "telegram_profiles": {
+                        "spark-agi": {"relay_port": 8789},
+                        "tester": {"relay_port": 8790, "autostart": False},
+                    }
+                },
+            )
+
+            with patch("spark_cli.cli.CONFIG_PATH", config_path), patch("sys.stdout", new_callable=StringIO):
+                self.assertEqual(manual_telegram_profiles(), ["tester"])
+                args = build_parser().parse_args(["autostart", "profile", "tester", "on"])
+                self.assertEqual(args.func(args), 0)
+                self.assertEqual(autostart_telegram_profiles(), ["spark-agi", "tester"])
+
+                args = build_parser().parse_args(["autostart", "profile", "tester", "off"])
+                self.assertEqual(args.func(args), 0)
+                self.assertEqual(manual_telegram_profiles(), ["tester"])
 
     def test_default_start_profiles_do_not_fall_back_when_all_profiles_are_manual(self) -> None:
         setup_state = {

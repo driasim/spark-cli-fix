@@ -2668,7 +2668,8 @@ def configure_telegram_profile(args: argparse.Namespace) -> int:
     if not isinstance(profiles, dict):
         profiles = {}
         setup_state["telegram_profiles"] = profiles
-    profiles[profile] = {
+    existing_profile_state = profiles.get(profile) if isinstance(profiles.get(profile), dict) else {}
+    profile_state = {
         "module": "spark-telegram-bot",
         "env_file": str(generated_module_env_path(gateway, profile)),
         "relay_port": relay_port,
@@ -2677,6 +2678,11 @@ def configure_telegram_profile(args: argparse.Namespace) -> int:
         "admin_ids_configured": bool(profile_env.get("ADMIN_TELEGRAM_IDS")),
         "configured_at": timestamp_now(),
     }
+    if getattr(args, "telegram_autostart", None) is not None:
+        profile_state["autostart"] = bool(getattr(args, "telegram_autostart"))
+    elif isinstance(existing_profile_state, dict) and "autostart" in existing_profile_state:
+        profile_state["autostart"] = existing_profile_state["autostart"]
+    profiles[profile] = profile_state
     if not isinstance(setup_state.get(PRIMARY_TELEGRAM_PROFILE_KEY), str):
         setup_state[PRIMARY_TELEGRAM_PROFILE_KEY] = profile
     save_json(CONFIG_PATH, setup_state)
@@ -6088,6 +6094,11 @@ def autostart_telegram_profiles() -> list[str]:
     )
 
 
+def manual_telegram_profiles() -> list[str]:
+    autostart_profiles = set(autostart_telegram_profiles())
+    return [profile for profile in configured_telegram_profiles() if profile not in autostart_profiles]
+
+
 def configured_telegram_profiles() -> list[str]:
     setup_state = load_json(CONFIG_PATH, {})
     profiles = setup_state.get("telegram_profiles") if isinstance(setup_state, dict) else None
@@ -6425,15 +6436,40 @@ def cmd_autostart_uninstall(_: argparse.Namespace) -> int:
     raise SystemExit(f"Autostart is not supported on this platform yet: {sys.platform}")
 
 
+def cmd_autostart_profile(args: argparse.Namespace) -> int:
+    profile = normalize_telegram_profile(getattr(args, "profile", None))
+    enabled = getattr(args, "state", "") == "on"
+    setup_state = load_json(CONFIG_PATH, {})
+    profiles = setup_state.get("telegram_profiles") if isinstance(setup_state, dict) else None
+    if not isinstance(profiles, dict) or profile not in profiles or not isinstance(profiles.get(profile), dict):
+        print(f"Telegram profile is not configured: {profile}")
+        print("Configure it first with:")
+        print(f"  spark setup --profile {profile} --bot-token <BOTFATHER_TOKEN>")
+        return 1
+    profiles[profile]["autostart"] = enabled
+    save_json(CONFIG_PATH, setup_state)
+    state_text = "will start when Spark Live starts" if enabled else "will stay manual at login"
+    print(f"Telegram profile {profile}: {state_text}.")
+    print("Refresh OS startup with:")
+    print("  spark autostart install --now")
+    return 0
+
+
 def cmd_autostart_status(_: argparse.Namespace) -> int:
     profiles = autostart_telegram_profiles()
     profile_text = ", ".join(profiles) if profiles else "none"
+    configured = configured_telegram_profiles()
+    configured_text = ", ".join(configured) if configured else "none"
+    manual = manual_telegram_profiles()
+    manual_text = ", ".join(manual) if manual else "none"
     if sys.platform.startswith("linux"):
         scope = linux_autostart_scope()
         service_path = linux_autostart_path(scope)
         print(f"Linux systemd {scope} service: {service_path}")
         print("Installed: " + ("yes" if service_path.exists() else "no"))
+        print(f"Telegram profiles configured: {configured_text}")
         print(f"Telegram profiles in autostart: {profile_text}")
+        print(f"Telegram profiles manual/off: {manual_text}")
         if service_path.exists():
             result = run_autostart_helper(systemctl_command(scope, "is-enabled", service_path.name))
             enabled = (result.stdout or result.stderr or "").strip() or f"exit {result.returncode}"
@@ -6444,7 +6480,9 @@ def cmd_autostart_status(_: argparse.Namespace) -> int:
         print(f"macOS LaunchAgent: {plist_path}")
         installed = plist_path.exists()
         print("Installed: " + ("yes" if installed else "no"))
+        print(f"Telegram profiles configured: {configured_text}")
         print(f"Telegram profiles in autostart: {profile_text}")
+        print(f"Telegram profiles manual/off: {manual_text}")
         if installed:
             try:
                 with plist_path.open("rb") as handle:
@@ -6472,7 +6510,9 @@ def cmd_autostart_status(_: argparse.Namespace) -> int:
         print("Task installed: " + ("yes" if task_installed else "no"))
         print(f"Startup fallback: {startup_path}")
         print("Startup fallback installed: " + ("yes" if startup_installed else "no"))
+        print(f"Telegram profiles configured: {configured_text}")
         print(f"Telegram profiles in autostart: {profile_text}")
+        print(f"Telegram profiles manual/off: {manual_text}")
         return 0
     raise SystemExit(f"Autostart is not supported on this platform yet: {sys.platform}")
 
@@ -7189,6 +7229,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TELEGRAM_PROFILE,
         help="Configure a named Telegram bot profile",
     )
+    setup_autostart_group = setup_parser.add_mutually_exclusive_group()
+    setup_autostart_group.add_argument(
+        "--telegram-autostart",
+        dest="telegram_autostart",
+        action="store_true",
+        default=None,
+        help="Start this Telegram profile whenever Spark Live/autostart starts",
+    )
+    setup_autostart_group.add_argument(
+        "--no-telegram-autostart",
+        dest="telegram_autostart",
+        action="store_false",
+        help="Keep this Telegram profile manual; it will not start at login",
+    )
     setup_parser.add_argument("--spawner-ui-url", default="http://127.0.0.1:5173")
     setup_parser.add_argument("--llm-provider", choices=LLM_PROVIDER_CHOICES, help="Default provider for all Spark LLM roles unless a role-specific provider is set")
     setup_parser.add_argument("--chat-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for Telegram chat replies")
@@ -7356,6 +7410,13 @@ def build_parser() -> argparse.ArgumentParser:
     autostart_install_parser.set_defaults(func=cmd_autostart_install)
     autostart_uninstall_parser = autostart_subparsers.add_parser("uninstall", help="Remove OS login autostart")
     autostart_uninstall_parser.set_defaults(func=cmd_autostart_uninstall)
+    autostart_profile_parser = autostart_subparsers.add_parser(
+        "profile",
+        help="Turn login startup on or off for one Telegram profile",
+    )
+    autostart_profile_parser.add_argument("profile", help="Telegram profile name, for example spark-agi or qa-bot")
+    autostart_profile_parser.add_argument("state", choices=["on", "off"], help="Whether this profile should start with Spark Live")
+    autostart_profile_parser.set_defaults(func=cmd_autostart_profile)
     autostart_status_parser = autostart_subparsers.add_parser("status", help="Show OS login autostart status")
     autostart_status_parser.set_defaults(func=cmd_autostart_status)
 
