@@ -6831,16 +6831,27 @@ def macos_autostart_path() -> Path:
 def windows_startup_script_path() -> Path:
     appdata = os.environ.get("APPDATA")
     base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / f"{AUTOSTART_SERVICE_NAME}.vbs"
+
+
+def windows_startup_legacy_cmd_path() -> Path:
+    appdata = os.environ.get("APPDATA")
+    base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
     return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / f"{AUTOSTART_SERVICE_NAME}.cmd"
+
+
+def vbs_string(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
 
 
 def write_windows_startup_script(path: Path, start_command: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    hidden_command = f"%ComSpec% /d /s /c {start_command}"
     path.write_text(
-        f"@echo off\r\n"
-        f"set \"SPARK_HOME={SPARK_HOME}\"\r\n"
-        f"cd /d \"{SPARK_HOME}\"\r\n"
-        f"{start_command}\r\n",
+        "Set shell = CreateObject(\"WScript.Shell\")\r\n"
+        f"shell.CurrentDirectory = {vbs_string(str(SPARK_HOME))}\r\n"
+        f"shell.Environment(\"PROCESS\")(\"SPARK_HOME\") = {vbs_string(str(SPARK_HOME))}\r\n"
+        f"shell.Run {vbs_string(hidden_command)}, 0, False\r\n",
         encoding="ascii",
     )
 
@@ -6950,6 +6961,9 @@ def cmd_autostart_install(args: argparse.Namespace) -> int:
             print_helper_failure(command, result)
             startup_path = windows_startup_script_path()
             write_windows_startup_script(startup_path, start_command)
+            legacy_cmd_path = windows_startup_legacy_cmd_path()
+            if legacy_cmd_path.exists():
+                legacy_cmd_path.unlink()
             print(f"Installed Windows Startup fallback: {startup_path}")
             if args.now:
                 now_command = ["cmd", "/c", start_command]
@@ -7018,6 +7032,11 @@ def cmd_autostart_uninstall(_: argparse.Namespace) -> int:
         if startup_path.exists():
             startup_path.unlink()
             print(f"Removed Windows Startup fallback: {startup_path}")
+            failures = 0 if failures else failures
+        legacy_cmd_path = windows_startup_legacy_cmd_path()
+        if legacy_cmd_path.exists():
+            legacy_cmd_path.unlink()
+            print(f"Removed legacy Windows Startup fallback: {legacy_cmd_path}")
             failures = 0 if failures else failures
         return 1 if failures else 0
 

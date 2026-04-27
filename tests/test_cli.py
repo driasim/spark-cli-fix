@@ -200,6 +200,7 @@ from spark_cli.cli import (
     autostart_shell_command,
     autostart_shell_commands,
     windows_cmd_c,
+    windows_startup_legacy_cmd_path,
     telegram_profiles_to_start_by_default,
     linux_autostart_path,
     systemctl_command,
@@ -2020,13 +2021,14 @@ class SparkCliTests(unittest.TestCase):
 
     def test_write_windows_startup_script_writes_user_login_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            startup_script = Path(tmp_dir) / "spark-telegram-agent.cmd"
+            startup_script = Path(tmp_dir) / "spark-telegram-agent.vbs"
             with patch("spark_cli.cli.SPARK_HOME", Path("C:/Users/Example/.spark")):
                 write_windows_startup_script(startup_script, r'"C:\Users\Example\.spark\bin\spark.cmd" start telegram-starter')
             content = startup_script.read_text(encoding="ascii")
-            self.assertIn('@echo off', content)
-            self.assertRegex(content, r'set "SPARK_HOME=C:[/\\]Users[/\\]Example[/\\]\.spark"')
-            self.assertIn(r'"C:\Users\Example\.spark\bin\spark.cmd" start telegram-starter', content)
+            self.assertIn('CreateObject("WScript.Shell")', content)
+            self.assertRegex(content, r'CurrentDirectory = "C:[/\\]Users[/\\]Example[/\\]\.spark"')
+            self.assertRegex(content, r'Environment\("PROCESS"\)\("SPARK_HOME"\) = "C:[/\\]Users[/\\]Example[/\\]\.spark"')
+            self.assertIn(r'%ComSpec% /d /s /c ""C:\Users\Example\.spark\bin\spark.cmd"" start telegram-starter', content)
 
     def test_autostart_install_windows_falls_back_to_startup_folder_when_task_denied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2060,9 +2062,11 @@ class SparkCliTests(unittest.TestCase):
     def test_windows_startup_script_path_uses_appdata(self) -> None:
         with patch.dict(os.environ, {"APPDATA": r"C:\Users\Example\AppData\Roaming"}):
             path_text = str(windows_startup_script_path())
-            self.assertIn("Microsoft", path_text)
-            self.assertIn("Startup", path_text)
-            self.assertTrue(path_text.endswith("spark-telegram-agent.cmd"))
+            legacy_path_text = str(windows_startup_legacy_cmd_path())
+        self.assertIn("Microsoft", path_text)
+        self.assertIn("Startup", path_text)
+        self.assertTrue(path_text.endswith("spark-telegram-agent.vbs"))
+        self.assertTrue(legacy_path_text.endswith("spark-telegram-agent.cmd"))
 
     def test_remove_windows_path_entry_prunes_spark_bin_case_insensitively(self) -> None:
         new_path, removed = remove_windows_path_entry(
