@@ -4190,11 +4190,18 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_live(args: argparse.Namespace) -> int:
     command = getattr(args, "live_command", "status")
-    if command == "start":
+    if command in {"start", "run"}:
         args.target = "telegram-starter"
         args.profile = DEFAULT_TELEGRAM_PROFILE
         args.allow_boot_warnings = False
-        return cmd_start(args)
+        start_code = cmd_start(args)
+        if command == "run":
+            print("")
+            print("Spark Live is running. Press Ctrl+C to stop watching logs; services keep running.")
+            print("To turn Spark off, run: spark live stop")
+            print("")
+            follow_live_logs(lines=getattr(args, "lines", 80))
+        return start_code
     if command == "stop":
         args.target = "telegram-starter"
         args.profile = DEFAULT_TELEGRAM_PROFILE
@@ -4207,23 +4214,65 @@ def cmd_live(args: argparse.Namespace) -> int:
         args.allow_boot_warnings = False
         return cmd_restart(args)
     if command == "logs":
-        targets = ["spawner-ui", "spark-telegram-bot"]
-        for index, target in enumerate(targets):
+        targets = live_log_targets()
+        for index, (label, path) in enumerate(targets):
             if index:
                 print("")
-            print(f"== {target} ==")
-            args.target = target
-            args.profile = DEFAULT_TELEGRAM_PROFILE
-            args.lines = getattr(args, "lines", 80)
-            args.follow = False
-            try:
-                cmd_logs(args)
-            except SystemExit as exc:
-                print(str(exc))
+            print(f"== {label} ==")
+            if path.exists():
+                for line in tail_log_lines(path, getattr(args, "lines", 80)):
+                    write_console_text(line if line.endswith("\n") else line + "\n")
+            else:
+                print(f"No logs yet at {path}")
+        if getattr(args, "follow", False):
+            follow_live_logs(lines=0)
         return 0
     if command == "status":
         return cmd_live_status(args)
     raise SystemExit(f"Unknown live command: {command}")
+
+
+def live_log_targets() -> list[tuple[str, Path]]:
+    targets: list[tuple[str, Path]] = [("spawner-ui", module_log_path("spawner-ui"))]
+    setup_state = load_json(CONFIG_PATH, {})
+    profiles = setup_state.get("telegram_profiles") if isinstance(setup_state, dict) else None
+    if isinstance(profiles, dict) and profiles:
+        for profile in sorted(profiles):
+            normalized = normalize_telegram_profile(str(profile))
+            targets.append((f"spark-telegram-bot:{normalized}", module_log_path("spark-telegram-bot", normalized)))
+    else:
+        targets.append(("spark-telegram-bot", module_log_path("spark-telegram-bot")))
+    return targets
+
+
+def follow_live_logs(*, lines: int = 80) -> None:
+    targets = live_log_targets()
+    positions: dict[Path, int] = {}
+    for label, path in targets:
+        print(f"== {label} ==")
+        if not path.exists():
+            print(f"No logs yet at {path}")
+            positions[path] = 0
+            continue
+        initial = tail_log_lines(path, lines)
+        for line in initial:
+            write_console_text(f"[{label}] {line if line.endswith(chr(10)) else line + chr(10)}")
+        positions[path] = path.stat().st_size
+    try:
+        while True:
+            for label, path in targets:
+                if not path.exists():
+                    continue
+                position = positions.get(path, 0)
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    handle.seek(position)
+                    for line in handle:
+                        write_console_text(f"[{label}] {line if line.endswith(chr(10)) else line + chr(10)}")
+                    positions[path] = handle.tell()
+            sys.stdout.flush()
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\nStopped watching Spark Live logs. Services are still running.")
 
 
 def cmd_live_status(args: argparse.Namespace) -> int:
@@ -7274,12 +7323,16 @@ def build_parser() -> argparse.ArgumentParser:
     live_status_parser.set_defaults(func=cmd_live)
     live_start_parser = live_subparsers.add_parser("start", help="Start Spark Live")
     live_start_parser.set_defaults(func=cmd_live)
+    live_run_parser = live_subparsers.add_parser("run", help="Start Spark Live and keep one combined log console open")
+    live_run_parser.add_argument("-n", "--lines", type=int, default=80)
+    live_run_parser.set_defaults(func=cmd_live)
     live_restart_parser = live_subparsers.add_parser("restart", help="Restart Spark Live")
     live_restart_parser.set_defaults(func=cmd_live)
     live_stop_parser = live_subparsers.add_parser("stop", help="Stop Spark Live")
     live_stop_parser.set_defaults(func=cmd_live)
     live_logs_parser = live_subparsers.add_parser("logs", help="Show Spark Live logs")
     live_logs_parser.add_argument("-n", "--lines", type=int, default=80)
+    live_logs_parser.add_argument("-f", "--follow", action="store_true", help="Keep watching combined Spark Live logs")
     live_logs_parser.set_defaults(func=cmd_live)
     live_parser.set_defaults(func=cmd_live, live_command="status")
 

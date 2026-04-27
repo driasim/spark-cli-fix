@@ -70,6 +70,7 @@ from spark_cli.cli import (
     load_json,
     long_path_aware,
     module_log_path,
+    live_log_targets,
     module_process_key,
     module_runtime_env,
     module_secret_env_bindings,
@@ -88,6 +89,7 @@ from spark_cli.cli import (
     dotted_unset,
     render_init_spark_toml,
     scaffold_module_files,
+    save_json,
     validate_init_module_name,
     describe_install_risk,
     enforce_module_trust_scan,
@@ -2627,6 +2629,36 @@ class SparkCliTests(unittest.TestCase):
         args = build_parser().parse_args(["live"])
 
         self.assertEqual(args.live_command, "status")
+
+    def test_live_run_starts_stack_and_follows_logs(self) -> None:
+        args = build_parser().parse_args(["live", "run", "--lines", "5"])
+
+        with patch("spark_cli.cli.cmd_start", return_value=0) as start, \
+             patch("spark_cli.cli.follow_live_logs") as follow:
+            self.assertEqual(cmd_live(args), 0)
+
+        live_args = start.call_args.args[0]
+        self.assertEqual(live_args.target, "telegram-starter")
+        follow.assert_called_once_with(lines=5)
+
+    def test_live_log_targets_include_named_telegram_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, \
+             patch("spark_cli.cli.CONFIG_PATH", Path(tmp_dir) / "config.json"):
+            save_json(
+                Path(tmp_dir) / "config.json",
+                {
+                    "telegram_profiles": {
+                        "spark-agi": {"relay_port": 8789},
+                        "testerthebester": {"relay_port": 8788},
+                    }
+                },
+            )
+
+            labels = [label for label, _ in live_log_targets()]
+
+        self.assertIn("spawner-ui", labels)
+        self.assertIn("spark-telegram-bot:spark-agi", labels)
+        self.assertIn("spark-telegram-bot:testerthebester", labels)
 
     def test_collect_secret_requirements_maps_manifest_secret_blocks(self) -> None:
         module = Module(
