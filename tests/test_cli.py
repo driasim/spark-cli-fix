@@ -121,6 +121,7 @@ from spark_cli.cli import (
     non_secret_llm_env,
     read_clipboard_text,
     read_secret_interactive,
+    redact_secret_surface_logs,
     resolve_secret_input,
     runtime_command_argv,
     runtime_version_satisfies,
@@ -493,6 +494,29 @@ class SparkCliTests(unittest.TestCase):
                 payload = collect_secret_surface_payload()
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["findings"], [])
+
+    def test_redact_secret_surface_logs_redacts_only_log_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            log_dir = root / "logs"
+            config_dir = root / "config" / "modules"
+            log_dir.mkdir()
+            config_dir.mkdir(parents=True)
+            log_path = log_dir / "process.log"
+            config_path = config_dir / "spawner-ui.env"
+            log_path.write_text(
+                "BOT_TOKEN=1234567890:AAabcdefghijklmnopqrstuvwxyz1234567890\n",
+                encoding="utf-8",
+            )
+            config_path.write_text("TELEGRAM_RELAY_SECRET=plain-relay-secret\n", encoding="utf-8")
+            with patch("spark_cli.cli.LOG_DIR", log_dir):
+                result = redact_secret_surface_logs()
+            log_text = log_path.read_text(encoding="utf-8")
+            config_text = config_path.read_text(encoding="utf-8")
+            self.assertEqual(len(result["changed"]), 1)
+            self.assertNotIn("1234567890:AA", log_text)
+            self.assertIn("[REDACTED]", log_text)
+            self.assertIn("plain-relay-secret", config_text)
 
     def test_upstream_pr_candidate_is_review_first_and_sanitized(self) -> None:
         draft = render_upstream_pr_candidate(

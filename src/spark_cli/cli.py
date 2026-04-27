@@ -4441,6 +4441,33 @@ def collect_secret_surface_payload() -> dict[str, Any]:
     }
 
 
+def redact_secret_surface_logs() -> dict[str, Any]:
+    changed: list[str] = []
+    scanned = 0
+    if not LOG_DIR.exists():
+        return {"changed": changed, "scanned_files": scanned}
+    try:
+        files = [path for path in LOG_DIR.rglob("*") if path.is_file()]
+    except OSError:
+        return {"changed": changed, "scanned_files": scanned}
+    for path in files:
+        scanned += 1
+        try:
+            if path.stat().st_size > SECRET_SURFACE_MAX_FILE_BYTES:
+                continue
+            original = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        redacted = redact_sensitive_text(original)
+        if redacted != original:
+            try:
+                path.write_text(redacted, encoding="utf-8")
+            except OSError:
+                continue
+            changed.append(redact_shareable_text(str(path)))
+    return {"changed": changed, "scanned_files": scanned}
+
+
 def redact_sensitive_text(value: str) -> str:
     redacted = str(value)
     for pattern in SENSITIVE_VALUE_PATTERNS:
@@ -4903,6 +4930,22 @@ def collect_telegram_fix_payload() -> dict[str, Any]:
 
 def cmd_fix(args: argparse.Namespace) -> int:
     if args.target == "secrets":
+        if getattr(args, "redact_logs", False):
+            result = redact_secret_surface_logs()
+            changed = result.get("changed", [])
+            print("Spark log redaction")
+            print("")
+            if changed:
+                print(f"[OK] Redacted secret-like values in {len(changed)} log file(s).")
+                for path in changed:
+                    print(f"      {path}")
+            else:
+                print(f"[OK] No log files needed redaction ({result.get('scanned_files', 0)} scanned).")
+            print("")
+            print("Next:")
+            print("  spark verify --deep")
+            return 0
+
         payload = collect_secret_surface_payload()
         if args.json:
             print(json.dumps(payload, indent=2))
@@ -4917,8 +4960,8 @@ def cmd_fix(args: argparse.Namespace) -> int:
         if not payload.get("ok"):
             print("")
             print("Repair:")
+            print("  - Run `spark fix secrets --redact-logs` to redact local generated logs.")
             print("  - Rerun `spark setup` after updating modules so keychain-backed secrets are removed from generated env files.")
-            print("  - Delete or redact old local logs before sharing reports.")
             print("  - Run `spark verify --deep` again before sharing any diagnostics upstream.")
         return 0 if payload.get("ok") else 1
 
@@ -7479,6 +7522,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     fix_parser = subparsers.add_parser("fix", help="Run targeted repair guidance for common Spark issues")
     fix_parser.add_argument("target", nargs="?", choices=["telegram", "secrets"], default="telegram")
+    fix_parser.add_argument("--redact-logs", action="store_true", help="For `spark fix secrets`, redact secret-like values in local generated logs")
     fix_parser.add_argument("--json", action="store_true")
     fix_parser.set_defaults(func=cmd_fix)
 
