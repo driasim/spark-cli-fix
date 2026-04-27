@@ -2235,6 +2235,20 @@ def default_mission_llm_provider(default_provider: str) -> str:
     return default_provider
 
 
+def openai_base_url_kind(base_url: str | None) -> str:
+    if not base_url:
+        return "default"
+    default_base = str(LLM_PROVIDER_ENV["openai"]["base_url_default"]).rstrip("/")
+    normalized = str(base_url).strip().rstrip("/")
+    if not normalized or normalized == default_base:
+        return "default"
+    parsed = urllib.parse.urlparse(normalized)
+    host = (parsed.hostname or "").lower()
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return "local"
+    return "remote_custom"
+
+
 def resolve_llm_roles(args: argparse.Namespace, secret_values: dict[str, str]) -> dict[str, str]:
     default_provider = resolve_llm_provider(args, secret_values)
     roles: dict[str, str] = {}
@@ -2258,8 +2272,13 @@ def provider_auth_mode(provider: str, env: dict[str, str]) -> str:
         return "api_key"
     if provider == "codex" and detect_codex_cli()["present"]:
         return "codex_oauth"
-    if provider == "openai" and detect_codex_cli()["present"]:
-        return "codex_oauth"
+    if provider == "openai":
+        base_kind = openai_base_url_kind(env.get("OPENAI_BASE_URL"))
+        if base_kind == "local":
+            return "local"
+        if base_kind == "default" and detect_codex_cli()["present"]:
+            return "codex_oauth"
+        return "not_configured"
     if provider == "anthropic" and detect_claude_code()["present"]:
         return "claude_oauth"
     if provider == "ollama":
@@ -2338,6 +2357,7 @@ def llm_setup_state(provider: str, env: dict[str, str]) -> dict[str, Any]:
             "bot_provider": LLM_PROVIDER_ENV[str(role_provider)]["bot_provider"],
             "model": role_model,
             "auth_mode": role_auth,
+            "base_url": env.get(f"SPARK_{role.upper()}_LLM_BASE_URL", ""),
         }
     return {
         "provider": provider,
@@ -3482,8 +3502,14 @@ def build_llm_repair_hints(llm_state: dict[str, Any], *, secret_keys: set[str] |
                 auth_mode = "api_key"
             elif api_key_secret and api_key_secret in stored_secret_keys:
                 auth_mode = "api_key"
-            elif provider in {"codex", "openai"} and detect_codex_cli()["present"]:
+            elif provider == "codex" and detect_codex_cli()["present"]:
                 auth_mode = "codex_oauth"
+            elif provider == "openai":
+                base_kind = openai_base_url_kind(str(state.get("base_url") or llm_state.get("base_url") or ""))
+                if base_kind == "local":
+                    auth_mode = "local"
+                elif base_kind == "default" and detect_codex_cli()["present"]:
+                    auth_mode = "codex_oauth"
             elif provider == "anthropic" and detect_claude_code()["present"]:
                 auth_mode = "claude_oauth"
             elif provider == "ollama":
@@ -3505,6 +3531,10 @@ def build_llm_repair_hints(llm_state: dict[str, Any], *, secret_keys: set[str] |
         elif provider == "minimax" and auth_mode == "not_configured":
             hints.append(
                 f"{role_label} uses MiniMax but is missing an API key. Re-run `spark setup {role_flag} minimax --minimax-api-key <key>`."
+            )
+        elif provider == "openai" and auth_mode == "not_configured" and openai_base_url_kind(str(state.get("base_url") or llm_state.get("base_url") or "")) == "remote_custom":
+            hints.append(
+                f"{role_label} uses a custom OpenAI-compatible endpoint but is missing an API key. Re-run `spark setup {role_flag} openai --openai-api-key <key> --openai-base-url <url>`."
             )
         elif provider == "openai" and auth_mode == "not_configured":
             hints.append(
@@ -4645,8 +4675,14 @@ def provider_status_payload() -> dict[str, Any]:
                 auth_mode = "api_key"
             elif api_key_secret and api_key_secret in secret_keys:
                 auth_mode = "api_key"
-            elif provider in {"codex", "openai"} and detect_codex_cli()["present"]:
+            elif provider == "codex" and detect_codex_cli()["present"]:
                 auth_mode = "codex_oauth"
+            elif provider == "openai":
+                base_kind = openai_base_url_kind(str(state.get("base_url") or llm_state.get("base_url") or ""))
+                if base_kind == "local":
+                    auth_mode = "local"
+                elif base_kind == "default" and detect_codex_cli()["present"]:
+                    auth_mode = "codex_oauth"
             elif provider == "anthropic" and detect_claude_code()["present"]:
                 auth_mode = "claude_oauth"
             elif provider == "ollama":
@@ -4656,6 +4692,7 @@ def provider_status_payload() -> dict[str, Any]:
             "bot_provider": state.get("bot_provider") or provider_spec.get("bot_provider"),
             "model": state.get("model") or llm_state.get("model") or "",
             "auth_mode": auth_mode,
+            "base_url": state.get("base_url") or llm_state.get("base_url") or "",
             "ready": provider != "not_configured" and auth_mode != "not_configured",
         }
     repair_hints = build_llm_repair_hints({"provider": llm_state.get("provider"), "roles": role_payload})

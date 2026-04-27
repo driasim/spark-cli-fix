@@ -2785,6 +2785,43 @@ class SparkCliTests(unittest.TestCase):
         self.assertNotIn("SPARK_OPENAI_API_KEY", envs["spawner-ui"])
         self.assertNotIn("SPARK_SPARK_LLM_PROVIDER", envs["spawner-ui"])
 
+    def test_build_module_envs_treats_local_openai_compatible_as_local_auth(self) -> None:
+        gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
+        builder = make_module("spark-intelligence-builder", ["spark.runtime"])
+        spawner = make_module("spawner-ui", ["mission.execution"])
+
+        class Args:
+            spawner_ui_url = "http://127.0.0.1:5173"
+            telegram_relay_secret = None
+            llm_provider = "openai"
+            chat_llm_provider = None
+            builder_llm_provider = None
+            memory_llm_provider = None
+            mission_llm_provider = None
+            openai_base_url = "http://localhost:1234/v1"
+            openai_model = "google/gemma-4-04b-2"
+
+        with patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "/usr/local/bin/codex"}):
+            envs = build_module_envs(
+                Args(),
+                {
+                    gateway.name: gateway,
+                    builder.name: builder,
+                    spawner.name: spawner,
+                },
+                {
+                    "telegram.bot_token": "abc",
+                    "telegram.admin_ids": "123",
+                },
+            )
+
+        gateway_env = envs["spark-telegram-bot"]
+        self.assertEqual(gateway_env["SPARK_CHAT_LLM_PROVIDER"], "openai")
+        self.assertEqual(gateway_env["SPARK_CHAT_LLM_BASE_URL"], "http://localhost:1234/v1")
+        self.assertEqual(gateway_env["SPARK_CHAT_LLM_MODEL"], "google/gemma-4-04b-2")
+        self.assertEqual(gateway_env["SPARK_CHAT_LLM_AUTH_MODE"], "local")
+        self.assertEqual(gateway_env["SPARK_MISSION_LLM_AUTH_MODE"], "local")
+
     def test_build_module_envs_wires_codex_as_local_execution_provider(self) -> None:
         gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
         builder = make_module("spark-intelligence-builder", ["spark.runtime"])
@@ -4837,6 +4874,29 @@ class SparkCliTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["roles"]["chat"]["auth_mode"], "api_key")
         self.assertEqual(payload["roles"]["mission"]["bot_provider"], "minimax")
+
+    def test_provider_status_payload_does_not_mask_local_openai_compatible_as_codex(self) -> None:
+        setup_state = {
+            "llm": {
+                "provider": "openai",
+                "roles": {
+                    role: {
+                        "provider": "openai",
+                        "model": "google/gemma-4-04b-2",
+                        "auth_mode": "not_configured",
+                        "base_url": "http://localhost:1234/v1",
+                        "bot_provider": "codex",
+                    }
+                    for role in ("chat", "builder", "memory", "mission")
+                },
+            }
+        }
+        with patch("spark_cli.cli.load_json", return_value=setup_state), \
+             patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "/usr/local/bin/codex"}):
+            payload = provider_status_payload()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["roles"]["chat"]["auth_mode"], "local")
+        self.assertEqual(payload["roles"]["chat"]["model"], "google/gemma-4-04b-2")
 
     def test_provider_status_payload_accepts_legacy_top_level_auth(self) -> None:
         setup_state = {
