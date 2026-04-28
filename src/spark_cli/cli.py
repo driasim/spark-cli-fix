@@ -5790,7 +5790,7 @@ def print_llm_provider_recommendations(payload: dict[str, Any]) -> None:
 
 
 def cmd_recommend(args: argparse.Namespace) -> int:
-    if args.recommend_command == "llms":
+    if args.recommend_command in {"llms", "providers"}:
         payload = provider_recommendations_payload()
         if args.json:
             print(json.dumps(payload, indent=2))
@@ -8275,6 +8275,9 @@ def build_parser() -> argparse.ArgumentParser:
     recommend_llms_parser = recommend_sub.add_parser("llms", help="Recommend LLM providers for Spark")
     recommend_llms_parser.add_argument("--json", action="store_true")
     recommend_llms_parser.set_defaults(func=cmd_recommend)
+    recommend_providers_parser = recommend_sub.add_parser("providers", help="Recommend LLM providers for Spark")
+    recommend_providers_parser.add_argument("--json", action="store_true")
+    recommend_providers_parser.set_defaults(func=cmd_recommend)
 
     security_parser = subparsers.add_parser("security", help="Audit Spark's local security posture")
     security_subparsers = security_parser.add_subparsers(dest="security_command", required=True)

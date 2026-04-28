@@ -4444,6 +4444,15 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("want_local_private", payload["paths"])
         self.assertIn("lmstudio", payload["paths"]["want_local_private"])
 
+    def test_cmd_recommend_providers_is_alias_for_llms(self) -> None:
+        args = build_parser().parse_args(["recommend", "providers"])
+        with patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(args.func(args), 0)
+        output = stdout.getvalue()
+        self.assertIn("Spark LLM recommendations", output)
+        self.assertIn("spark setup --llm-provider codex", output)
+        self.assertIn("spark setup --llm-provider lmstudio", output)
+
     def test_collect_secret_values_prompts_when_interactive_and_missing(self) -> None:
         module = Module(
             name="spark-telegram-bot",
