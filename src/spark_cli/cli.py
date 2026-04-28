@@ -2337,14 +2337,61 @@ def provider_recommendations_payload() -> dict[str, Any]:
         ],
     }
 
+SPARK_TERMINAL_COLORS = {
+    "bg": "#171918",
+    "bg_deep": "#0E1018",
+    "surface": "#181C26",
+    "accent": "#2FCA94",
+    "accent_dim": "#1F8C66",
+    "iris": "#B8A8DC",
+    "text": "#F0F0F4",
+    "muted": "#8890B0",
+}
+
+
+def terminal_supports_color() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    try:
+        return bool(sys.stdout.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+    raw = value.strip().lstrip("#")
+    if len(raw) == 3:
+        raw = "".join(ch * 2 for ch in raw)
+    if len(raw) != 6:
+        raise ValueError(f"Invalid RGB hex color: {value}")
+    return int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
+
+
+def terminal_style(text: str, *, fg: str | None = None, bg: str | None = None, bold: bool = False) -> str:
+    if not terminal_supports_color():
+        return text
+    parts: list[str] = []
+    if bold:
+        parts.append("1")
+    if fg:
+        r, g, b = _hex_to_rgb(SPARK_TERMINAL_COLORS.get(fg, fg))
+        parts.append(f"38;2;{r};{g};{b}")
+    if bg:
+        r, g, b = _hex_to_rgb(SPARK_TERMINAL_COLORS.get(bg, bg))
+        parts.append(f"48;2;{r};{g};{b}")
+    if not parts:
+        return text
+    return f"\033[{';'.join(parts)}m{text}\033[0m"
+
 
 def terminal_color(text: str, code: str) -> str:
-    if os.environ.get("NO_COLOR"):
-        return text
-    try:
-        if not sys.stdout.isatty():
-            return text
-    except (AttributeError, ValueError):
+    if code == "spark-title":
+        return terminal_style(text, fg="accent", bg="bg", bold=True)
+    if code == "spark-section":
+        return terminal_style(text, fg="accent", bold=True)
+    if code == "spark-provider":
+        return terminal_style(text, fg="iris")
+    if not terminal_supports_color():
         return text
     return f"\033[{code}m{text}\033[0m"
 
@@ -5817,10 +5864,10 @@ def cmd_providers(args: argparse.Namespace) -> int:
 
 
 def print_llm_provider_recommendations(payload: dict[str, Any]) -> None:
-    print(terminal_color(payload["summary"], "36;1"))
+    print(terminal_color(f" {payload['summary']} ", "spark-title"))
     print(payload["default_rule"])
     print("")
-    print(terminal_color("Best starting points", "32;1"))
+    print(terminal_color("Best starting points", "spark-section"))
     print("  OpenAI Codex subscription:     spark setup --llm-provider codex")
     print("     Sign in first with:         codex --login")
     print("")
@@ -5832,10 +5879,12 @@ def print_llm_provider_recommendations(payload: dict[str, Any]) -> None:
     print("  Local/private desktop route:   spark setup --llm-provider lmstudio")
     print("  Local/private terminal:        spark setup --llm-provider ollama")
     print("")
-    print(terminal_color("Provider guide", "32;1"))
+    print(terminal_color("Provider guide", "spark-section"))
     for provider in payload["providers"]:
         models = ", ".join(provider["recommended_models"])
-        print(f"  {terminal_color(provider['id'], '36'):<18} {provider['lane']}")
+        provider_id = str(provider["id"])
+        provider_pad = " " * max(1, 18 - len(provider_id))
+        print(f"  {terminal_color(provider_id, 'spark-provider')}{provider_pad} {provider['lane']}")
         print(f"    Models: {models}")
         print(f"    Best for: {provider['best_for']}")
         print(f"    Start: {provider['getting_started']}")
