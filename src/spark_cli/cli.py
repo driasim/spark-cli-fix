@@ -2038,6 +2038,41 @@ def keychain_env_for_telegram_profile(profile: str | None) -> dict[str, str]:
     return env
 
 
+def validate_telegram_profile_token_identity(profile: str | None) -> None:
+    """Fail closed when a named Telegram profile's token points at the wrong bot."""
+    normalized = normalize_telegram_profile(profile)
+    if telegram_profile_is_default(normalized):
+        return
+    setup_state = load_json(CONFIG_PATH, {})
+    profiles = setup_state.get("telegram_profiles") if isinstance(setup_state, dict) else None
+    profile_state = profiles.get(normalized) if isinstance(profiles, dict) else None
+    if not isinstance(profile_state, dict):
+        return
+    expected_username = str(profile_state.get("telegram_username") or "").strip().lstrip("@")
+    expected_id = str(profile_state.get("telegram_bot_id") or "").strip()
+    if not expected_username and not expected_id:
+        return
+    token = fetch_secret(telegram_profile_secret_id(normalized, "bot_token"))
+    if not token:
+        raise SystemExit(
+            f"Telegram profile `{normalized}` has no stored bot token. "
+            f"Reconnect it with `spark telegram connect {normalized}`."
+        )
+    identity = validate_telegram_bot_token(token, secret_id=telegram_profile_secret_id(normalized, "bot_token"))
+    actual_username = str(identity.get("username") or "").strip().lstrip("@")
+    actual_id = str(identity.get("id") or "").strip()
+    username_mismatch = expected_username and actual_username.lower() != expected_username.lower()
+    id_mismatch = expected_id and actual_id != expected_id
+    if username_mismatch or id_mismatch:
+        expected_label = f"@{expected_username}" if expected_username else f"id {expected_id}"
+        actual_label = f"@{actual_username}" if actual_username else f"id {actual_id or 'unknown'}"
+        raise SystemExit(
+            f"Refusing to start Telegram profile `{normalized}`: stored token belongs to {actual_label}, "
+            f"but this profile is locked to {expected_label}. "
+            f"Reconnect the intended bot with `spark telegram connect {normalized}`."
+        )
+
+
 def spark_builder_home() -> Path:
     return STATE_DIR / "spark-intelligence"
 
@@ -2887,6 +2922,11 @@ def configure_telegram_profile(args: argparse.Namespace) -> int:
         "admin_ids_configured": bool(profile_env.get("ADMIN_TELEGRAM_IDS")),
         "configured_at": timestamp_now(),
     }
+    if bot_identity:
+        if bot_identity.get("username"):
+            profile_state["telegram_username"] = str(bot_identity["username"]).lstrip("@")
+        if bot_identity.get("id") is not None:
+            profile_state["telegram_bot_id"] = str(bot_identity["id"])
     if getattr(args, "telegram_autostart", None) is not None:
         profile_state["autostart"] = bool(getattr(args, "telegram_autostart"))
     elif isinstance(existing_profile_state, dict) and "autostart" in existing_profile_state:
@@ -4138,7 +4178,34 @@ def write_setup_runtime_config(
         env_path = module_env_path(module)
         if env_path is not None and env_values:
             update_env_file(env_path, env_values)
+    refresh_telegram_profile_envs(modules)
     return builder_notes, keychain_report
+
+
+def refresh_telegram_profile_envs(modules: dict[str, Module]) -> None:
+    gateway = modules.get("spark-telegram-bot")
+    if gateway is None:
+        return
+    setup_state = load_json(CONFIG_PATH, {})
+    profiles = setup_state.get("telegram_profiles") if isinstance(setup_state, dict) else None
+    if not isinstance(profiles, dict):
+        return
+    base_env = read_generated_env(generated_module_env_path(gateway))
+    for profile, profile_state in profiles.items():
+        if not isinstance(profile_state, dict):
+            continue
+        normalized = normalize_telegram_profile(str(profile))
+        if telegram_profile_is_default(normalized):
+            continue
+        existing_env = read_generated_env(generated_module_env_path(gateway, normalized))
+        refreshed_env = dict(base_env)
+        if existing_env.get("ADMIN_TELEGRAM_IDS"):
+            refreshed_env["ADMIN_TELEGRAM_IDS"] = existing_env["ADMIN_TELEGRAM_IDS"]
+        refreshed_env["TELEGRAM_GATEWAY_MODE"] = "polling"
+        refreshed_env["TELEGRAM_RELAY_PORT"] = str(profile_state.get("relay_port") or existing_env.get("TELEGRAM_RELAY_PORT") or "")
+        refreshed_env["SPARK_TELEGRAM_PROFILE"] = normalized
+        refreshed_env.pop("BOT_TOKEN", None)
+        write_generated_env(generated_module_env_path(gateway, normalized), refreshed_env)
 
 
 def print_setup_summary(
@@ -6854,6 +6921,8 @@ def start_module(module: Module, *, allow_boot_warnings: bool = False, profile: 
         return True
     enforce_module_trust_scan(module, module.name)
     require_write_allowed(module.path, safe_root=spark_write_safe_root(), subject=f"{module.name} module root")
+    if module.name == "spark-telegram-bot":
+        validate_telegram_profile_token_identity(profile)
 
     process_key = module_process_key(module.name, profile)
     display_name = process_key

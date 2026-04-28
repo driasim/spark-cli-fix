@@ -186,6 +186,7 @@ from spark_cli.cli import (
     stop_module,
     scan_module_trust,
     telegram_profile_runtime_status,
+    validate_telegram_profile_token_identity,
     tracked_process_keys_for_module,
     wait_for_ready_check,
     write_boundary_env,
@@ -943,7 +944,73 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8792/spawner-events", spawner_env["MISSION_CONTROL_WEBHOOK_URLS"])
         self.assertEqual(setup_state["telegram_profiles"]["qa-bot"]["relay_port"], 8792)
         self.assertEqual(setup_state["primary_telegram_profile"], "qa-bot")
+        self.assertEqual(setup_state["telegram_profiles"]["qa-bot"]["telegram_username"], "qa_bot")
         self.assertEqual(stored_token, "profile-token")
+
+    def test_telegram_profile_identity_guard_rejects_token_for_wrong_bot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_dir = root / "config"
+            state_dir = root / "state"
+            config_dir.mkdir(parents=True)
+            state_dir.mkdir(parents=True)
+            setup_path = state_dir / "setup.json"
+            save_json(
+                setup_path,
+                {
+                    "telegram_profiles": {
+                        "spark-agi": {
+                            "relay_port": 8789,
+                            "telegram_username": "SparkAGI_bot",
+                            "telegram_bot_id": "111",
+                        }
+                    }
+                },
+            )
+            with patch("spark_cli.cli.CONFIG_DIR", config_dir), \
+                 patch("spark_cli.cli.STATE_DIR", state_dir), \
+                 patch("spark_cli.cli.CONFIG_PATH", setup_path), \
+                 patch("spark_cli.cli.SECRETS_INDEX_PATH", config_dir / "secrets_index.json"), \
+                 patch("spark_cli.cli.SECRETS_FILE_PATH", config_dir / "secrets.local.json"), \
+                 patch("spark_cli.cli.keychain_available", return_value=False), \
+                 patch("spark_cli.cli.validate_telegram_bot_token", return_value={"username": "OdseyTheGalactic_bot", "id": 222}):
+                store_secret("telegram.profiles.spark-agi.bot_token", "wrong-token", preferred="keychain")
+                with self.assertRaises(SystemExit) as error:
+                    validate_telegram_profile_token_identity("spark-agi")
+
+        self.assertIn("Refusing to start Telegram profile `spark-agi`", str(error.exception))
+        self.assertIn("@OdseyTheGalactic_bot", str(error.exception))
+        self.assertIn("@SparkAGI_bot", str(error.exception))
+
+    def test_telegram_profile_identity_guard_allows_expected_bot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_dir = root / "config"
+            state_dir = root / "state"
+            config_dir.mkdir(parents=True)
+            state_dir.mkdir(parents=True)
+            setup_path = state_dir / "setup.json"
+            save_json(
+                setup_path,
+                {
+                    "telegram_profiles": {
+                        "spark-agi": {
+                            "relay_port": 8789,
+                            "telegram_username": "SparkAGI_bot",
+                            "telegram_bot_id": "111",
+                        }
+                    }
+                },
+            )
+            with patch("spark_cli.cli.CONFIG_DIR", config_dir), \
+                 patch("spark_cli.cli.STATE_DIR", state_dir), \
+                 patch("spark_cli.cli.CONFIG_PATH", setup_path), \
+                 patch("spark_cli.cli.SECRETS_INDEX_PATH", config_dir / "secrets_index.json"), \
+                 patch("spark_cli.cli.SECRETS_FILE_PATH", config_dir / "secrets.local.json"), \
+                 patch("spark_cli.cli.keychain_available", return_value=False), \
+                 patch("spark_cli.cli.validate_telegram_bot_token", return_value={"username": "SparkAGI_bot", "id": 111}):
+                store_secret("telegram.profiles.spark-agi.bot_token", "right-token", preferred="keychain")
+                validate_telegram_profile_token_identity("spark-agi")
 
     def test_configure_telegram_profile_rejects_bad_token_without_overwriting_existing_secret(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
