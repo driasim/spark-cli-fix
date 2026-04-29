@@ -5085,6 +5085,91 @@ def module_supply_chain_errors() -> list[str]:
     return errors
 
 
+def runtime_supply_chain_warnings(modules: Iterable[Module]) -> list[str]:
+    """Return warnings for startable installed modules that drift from registry pins."""
+    registry_modules = load_registry_definition().get("modules", {})
+    if not isinstance(registry_modules, dict):
+        registry_modules = {}
+    modules_root = SPARK_HOME / "modules"
+    try:
+        resolved_modules_root = modules_root.resolve()
+    except OSError:
+        resolved_modules_root = modules_root
+
+    warnings: list[str] = []
+    for module in modules:
+        if not module.run_command:
+            continue
+        try:
+            resolved_path = module.path.resolve()
+            in_managed_home = resolved_path.is_relative_to(resolved_modules_root)
+        except AttributeError:  # pragma: no cover - Python <3.9 fallback
+            in_managed_home = str(resolved_modules_root) in str(module.path.resolve())
+        except OSError:
+            warnings.append(f"{module.name}: could not resolve installed runtime path.")
+            continue
+        if not in_managed_home:
+            continue
+
+        metadata = registry_modules.get(module.name)
+        if not isinstance(metadata, dict):
+            warnings.append(f"{module.name}: not present in the blessed registry.")
+            continue
+        pinned = str(metadata.get("commit") or "").strip().lower()
+        if not pinned:
+            warnings.append(f"{module.name}: blessed registry entry has no full commit pin.")
+        elif (module.path / ".git").exists():
+            current = git_current_head(module.path)
+            if current is None:
+                warnings.append(f"{module.name}: could not read git HEAD.")
+            elif current != pinned:
+                warnings.append(f"{module.name}: at {current[:12]}, expected pinned {pinned[:12]}.")
+            if git_short_status(module.path):
+                warnings.append(f"{module.name}: installed runtime has local git changes.")
+        else:
+            warnings.append(f"{module.name}: installed runtime is not a git checkout.")
+    return warnings
+
+
+def truthy_env(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def runtime_guard_bypassed(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "allow_dirty_runtime", False)) or truthy_env("SPARK_ALLOW_DIRTY_RUNTIME")
+
+
+def runtime_guard_is_strict() -> bool:
+    return truthy_env("SPARK_STRICT_RUNTIME_PINS")
+
+
+def emit_runtime_supply_chain_guard(modules: Iterable[Module], args: argparse.Namespace) -> bool:
+    """Warn, or fail in strict mode, when Spark would run a dirty managed checkout."""
+    if runtime_guard_bypassed(args):
+        return True
+    warnings = runtime_supply_chain_warnings(modules)
+    if not warnings:
+        return True
+
+    strict = runtime_guard_is_strict()
+    marker = "blocked" if strict else "warning"
+    print(f"Spark runtime hygiene {marker}: installed runtime code has drifted from the pinned registry.")
+    for warning in warnings:
+        print(f"  - {warning}")
+    print("")
+    print("Recommended workflow:")
+    print("  - Keep ~/.spark/modules/... as installed runtime only.")
+    print("  - Build in a dev checkout/worktree, for example C:\\Users\\USER\\Desktop\\spawner-ui.")
+    print("  - Test dev servers on another port, for example 5174, then commit/push and run spark update.")
+    if strict:
+        print("")
+        print("To run anyway for local development, add --allow-dirty-runtime or set SPARK_ALLOW_DIRTY_RUNTIME=1.")
+        return False
+    print("")
+    print("Continuing for now. To silence this for intentional local runtime testing, add --allow-dirty-runtime.")
+    return True
+
+
 def dependency_lockfile_errors() -> list[str]:
     installed = load_json(REGISTRY_PATH, {})
     errors: list[str] = []
@@ -8075,6 +8160,8 @@ def cmd_start(args: argparse.Namespace) -> int:
     exit_code = 0
     profile = normalize_telegram_profile(getattr(args, "profile", None))
     target_modules = resolve_start_modules(args.target, modules)
+    if not emit_runtime_supply_chain_guard(target_modules, args):
+        return 1
     requested_names = set(expand_targets(args.target, modules, include_all=True))
     for module in target_modules:
         if not module.run_command:
@@ -8161,6 +8248,8 @@ def cmd_restart(args: argparse.Namespace) -> int:
         else:
             stop_code = cmd_stop(args)
             module = installed_modules["spark-telegram-bot"]
+            if not emit_runtime_supply_chain_guard([module], args):
+                return 1
             start_code = 0
             if not start_module(
                 module,
@@ -8174,6 +8263,8 @@ def cmd_restart(args: argparse.Namespace) -> int:
         if getattr(args, "cascade", False)
         else resolve_start_modules(args.target, installed_modules)
     )
+    if not emit_runtime_supply_chain_guard(restart_modules, args):
+        return 1
     stop_code = cmd_stop(args)
     start_code = 0
     for module in restart_modules:
@@ -9612,6 +9703,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     start_parser = subparsers.add_parser("start", help="Start startable modules")
     start_parser.add_argument("--allow-boot-warnings", action="store_true", help=argparse.SUPPRESS)
+    start_parser.add_argument("--allow-dirty-runtime", action="store_true", help="Start even when installed runtime code has local edits or is off the registry pin")
     start_parser.add_argument("--profile", default=DEFAULT_TELEGRAM_PROFILE, help="Named Telegram bot profile to start")
     start_parser.add_argument("target", nargs="?")
     start_parser.set_defaults(func=cmd_start)
@@ -9623,6 +9715,7 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser.set_defaults(func=cmd_stop)
 
     restart_parser = subparsers.add_parser("restart", help="Restart startable modules")
+    restart_parser.add_argument("--allow-dirty-runtime", action="store_true", help="Restart even when installed runtime code has local edits or is off the registry pin")
     restart_parser.add_argument("--profile", default=DEFAULT_TELEGRAM_PROFILE, help="Named Telegram bot profile to restart")
     restart_parser.add_argument("--cascade", action="store_true", help="Also restart running modules that depend on the target")
     restart_parser.add_argument("target", nargs="?")
@@ -9634,6 +9727,7 @@ def build_parser() -> argparse.ArgumentParser:
     live_status_parser.add_argument("--json", action="store_true")
     live_status_parser.set_defaults(func=cmd_live)
     live_start_parser = live_subparsers.add_parser("start", help="Start Spark Live")
+    live_start_parser.add_argument("--allow-dirty-runtime", action="store_true", help="Start even when installed runtime code has local edits or is off the registry pin")
     live_start_parser.set_defaults(func=cmd_live)
     live_run_parser = live_subparsers.add_parser("run", help="Start Spark Live and keep one combined log console open")
     live_run_parser.add_argument(
@@ -9643,8 +9737,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=80,
         help="Lines of history to show before following (0 = new lines only)",
     )
+    live_run_parser.add_argument("--allow-dirty-runtime", action="store_true", help="Start even when installed runtime code has local edits or is off the registry pin")
     live_run_parser.set_defaults(func=cmd_live)
     live_restart_parser = live_subparsers.add_parser("restart", help="Restart Spark Live")
+    live_restart_parser.add_argument("--allow-dirty-runtime", action="store_true", help="Restart even when installed runtime code has local edits or is off the registry pin")
     live_restart_parser.set_defaults(func=cmd_live)
     live_stop_parser = live_subparsers.add_parser("stop", help="Stop Spark Live")
     live_stop_parser.set_defaults(func=cmd_live)

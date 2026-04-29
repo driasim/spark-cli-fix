@@ -40,6 +40,7 @@ from spark_cli.cli import (
     configure_telegram_profile,
     cmd_secrets_set,
     cmd_live,
+    cmd_start,
     cmd_setup,
     cmd_uninstall,
     cmd_update,
@@ -68,6 +69,7 @@ from spark_cli.cli import (
     pull_module_source,
     remove_tree,
     remove_windows_path_entry,
+    runtime_supply_chain_warnings,
     purge_spark_home,
     resolve_install_executable,
     install_module_record,
@@ -718,6 +720,100 @@ class SparkCliTests(unittest.TestCase):
                 errors = module_supply_chain_errors()
         self.assertTrue(any("not pinned" in error for error in errors))
         self.assertTrue(any("local git changes" in error for error in errors))
+
+    def test_runtime_supply_chain_warnings_only_check_startable_managed_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            spark_home = Path(tmp_dir) / ".spark"
+            managed_path = spark_home / "modules" / "spawner-ui" / "source"
+            dev_path = Path(tmp_dir) / "spawner-ui-dev"
+            (managed_path / ".git").mkdir(parents=True)
+            (dev_path / ".git").mkdir(parents=True)
+            spawner = Module(
+                name="spawner-ui",
+                path=managed_path,
+                manifest={
+                    "module": {"name": "spawner-ui", "version": "0.0.1", "kind": "app", "plane": "execution"},
+                    "run": {"default": {"command": "npm run dev"}},
+                },
+            )
+            dev = Module(
+                name="spawner-ui-dev",
+                path=dev_path,
+                manifest={
+                    "module": {"name": "spawner-ui-dev", "version": "0.0.1", "kind": "app", "plane": "execution"},
+                    "run": {"default": {"command": "npm run dev"}},
+                },
+            )
+            chip = Module(
+                name="domain-chip-memory",
+                path=spark_home / "modules" / "domain-chip-memory" / "source",
+                manifest={"module": {"name": "domain-chip-memory", "version": "0.0.1", "kind": "chip-pack", "plane": "runtime"}},
+            )
+            registry = {
+                "modules": {
+                    "spawner-ui": {"commit": "a" * 40, "blessed": True},
+                    "spawner-ui-dev": {"commit": "a" * 40, "blessed": True},
+                    "domain-chip-memory": {"commit": "a" * 40, "blessed": True},
+                }
+            }
+            with patch("spark_cli.cli.SPARK_HOME", spark_home), \
+                 patch("spark_cli.cli.load_registry_definition", return_value=registry), \
+                 patch("spark_cli.cli.git_current_head", return_value="b" * 40), \
+                 patch("spark_cli.cli.git_short_status", return_value=" M src/app.ts"):
+                warnings = runtime_supply_chain_warnings([spawner, dev, chip])
+
+        self.assertTrue(any("spawner-ui:" in warning for warning in warnings))
+        self.assertFalse(any("spawner-ui-dev" in warning for warning in warnings))
+        self.assertFalse(any("domain-chip-memory" in warning for warning in warnings))
+
+    def test_cmd_start_warns_but_continues_when_runtime_is_dirty(self) -> None:
+        module = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={
+                "module": {"name": "spawner-ui", "version": "0.0.1", "kind": "app", "plane": "execution"},
+                "run": {"default": {"command": "npm run dev"}},
+            },
+        )
+        args = build_parser().parse_args(["start", "spawner-ui"])
+
+        with patch("spark_cli.cli.ensure_state_dirs"), \
+             patch("spark_cli.cli.resolve_installed_modules", return_value={"spawner-ui": module}), \
+             patch("spark_cli.cli.resolve_start_modules", return_value=[module]), \
+             patch("spark_cli.cli.expand_targets", return_value=["spawner-ui"]), \
+             patch("spark_cli.cli.runtime_supply_chain_warnings", return_value=["spawner-ui: installed runtime has local git changes."]), \
+             patch("spark_cli.cli.start_module", return_value=True) as start, \
+             patch.dict(os.environ, {"SPARK_STRICT_RUNTIME_PINS": ""}, clear=False), \
+             patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(cmd_start(args), 0)
+
+        start.assert_called_once()
+        self.assertIn("runtime hygiene warning", stdout.getvalue())
+        self.assertIn("Continuing for now", stdout.getvalue())
+
+    def test_cmd_start_blocks_dirty_runtime_in_strict_mode(self) -> None:
+        module = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={
+                "module": {"name": "spawner-ui", "version": "0.0.1", "kind": "app", "plane": "execution"},
+                "run": {"default": {"command": "npm run dev"}},
+            },
+        )
+        args = build_parser().parse_args(["start", "spawner-ui"])
+
+        with patch("spark_cli.cli.ensure_state_dirs"), \
+             patch("spark_cli.cli.resolve_installed_modules", return_value={"spawner-ui": module}), \
+             patch("spark_cli.cli.resolve_start_modules", return_value=[module]), \
+             patch("spark_cli.cli.runtime_supply_chain_warnings", return_value=["spawner-ui: installed runtime has local git changes."]), \
+             patch("spark_cli.cli.start_module") as start, \
+             patch.dict(os.environ, {"SPARK_STRICT_RUNTIME_PINS": "1"}, clear=False), \
+             patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(cmd_start(args), 1)
+
+        start.assert_not_called()
+        self.assertIn("runtime hygiene blocked", stdout.getvalue())
+        self.assertIn("--allow-dirty-runtime", stdout.getvalue())
 
     def test_dependency_lockfile_errors_flag_unlocked_node_module(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
