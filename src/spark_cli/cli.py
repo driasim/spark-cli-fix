@@ -6506,6 +6506,41 @@ def hosted_secret_file_permission_errors(paths: list[Path] | None = None) -> lis
     return errors
 
 
+def hosted_llm_role_providers(env: dict[str, str] | None = None) -> dict[str, str]:
+    source = env if env is not None else os.environ
+    default_provider = (source.get("SPARK_LLM_PROVIDER") or "").strip().lower()
+    return {
+        "chat": (source.get("SPARK_CHAT_LLM_PROVIDER") or default_provider).strip().lower(),
+        "builder": (source.get("SPARK_BUILDER_LLM_PROVIDER") or default_provider).strip().lower(),
+        "memory": (source.get("SPARK_MEMORY_LLM_PROVIDER") or default_provider).strip().lower(),
+        "mission": (source.get("SPARK_MISSION_LLM_PROVIDER") or default_provider).strip().lower(),
+    }
+
+
+def hosted_headless_provider_errors(env: dict[str, str] | None = None) -> list[str]:
+    source = env if env is not None else os.environ
+    role_providers = hosted_llm_role_providers(source)
+    errors: list[str] = []
+
+    if not any(role_providers.values()):
+        return ["No hosted LLM provider is configured."]
+
+    for role, provider in role_providers.items():
+        if not provider or provider in {"none", "not_configured"}:
+            errors.append(f"{role} provider is not configured.")
+            continue
+
+        auth_mode = (source.get(f"SPARK_{role.upper()}_LLM_AUTH_MODE") or source.get("SPARK_LLM_AUTH_MODE") or "").strip().lower()
+        if provider == "codex" or auth_mode == "codex_oauth":
+            errors.append(f"{role} uses Codex OAuth/CLI; hosted Docker/Railway needs an API-key or local-network provider.")
+        elif provider == "anthropic" and auth_mode == "claude_oauth":
+            errors.append(f"{role} uses Claude Code OAuth/CLI; hosted Docker/Railway needs ANTHROPIC_API_KEY.")
+        elif provider == "anthropic" and not (source.get("ANTHROPIC_API_KEY") or "").strip():
+            errors.append(f"{role} uses Anthropic Claude but ANTHROPIC_API_KEY is not configured for hosted mode.")
+
+    return errors
+
+
 def hosted_spawner_base_url() -> str:
     port = (
         os.environ.get("SPARK_SPAWNER_PORT")
@@ -6593,7 +6628,8 @@ def hosted_deep_mission_smoke(timeout_seconds: int = 90) -> dict[str, Any]:
 
 
 def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
-    provider = (os.environ.get("SPARK_LLM_PROVIDER") or "").strip().lower()
+    role_providers = hosted_llm_role_providers()
+    provider_errors = hosted_headless_provider_errors()
     allowed_hosts = [host.strip() for host in (os.environ.get("SPARK_ALLOWED_HOSTS") or "").split(",") if host.strip()]
     allowed_host_errors = hosted_allowed_host_errors(allowed_hosts)
     ui_key = os.environ.get("SPARK_UI_API_KEY") or ""
@@ -6675,14 +6711,15 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
         },
         {
             "name": "headless_provider",
-            "ok": provider not in {"codex"},
+            "ok": not provider_errors,
             "required": True,
             "detail": (
-                f"Hosted provider is API-compatible/headless: {provider or 'not set'}."
-                if provider and provider not in {"codex"}
-                else "Codex OAuth is interactive and should not be used in hosted Docker/Railway."
+                "Hosted LLM roles are API/local-network compatible: "
+                + ", ".join(f"{role}={provider or 'not set'}" for role, provider in role_providers.items())
+                if not provider_errors
+                else "; ".join(provider_errors)
             ),
-            "repair": "Use openai, zai, openrouter, kimi, huggingface, minimax, or anthropic API-key mode for hosted Spark.",
+            "repair": "Use zai, kimi, openrouter, huggingface, minimax, openai API key, anthropic API key, LM Studio, or Ollama for hosted Spark.",
         },
         {
             "name": "hosted_secret_file_permissions",

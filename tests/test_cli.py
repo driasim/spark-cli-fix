@@ -6117,6 +6117,69 @@ class SparkCliTests(unittest.TestCase):
         self.assertFalse(checks["hosted_api_keys"]["ok"])
         self.assertFalse(checks["headless_provider"]["ok"])
 
+    def test_collect_hosted_security_payload_checks_every_llm_role_for_cli_providers(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SPARK_HOME": "/data/spark",
+                "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_MISSION_LLM_PROVIDER": "codex",
+                "SPARK_SPAWNER_HOST": "0.0.0.0",
+                "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
+                "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
+                "SPARK_UI_API_KEY": "ui-key-" + "u" * 32,
+            },
+            clear=True,
+        ), patch("spark_cli.cli.current_uid", return_value=1000), \
+            patch("spark_cli.cli.docker_socket_present", return_value=False), \
+            patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}):
+            payload = collect_hosted_security_payload()
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(payload["ok"])
+        self.assertFalse(checks["headless_provider"]["ok"])
+        self.assertIn("mission uses Codex OAuth/CLI", checks["headless_provider"]["detail"])
+
+    def test_collect_hosted_security_payload_requires_anthropic_api_key_for_hosted(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SPARK_HOME": "/data/spark",
+                "SPARK_LLM_PROVIDER": "anthropic",
+                "SPARK_SPAWNER_HOST": "0.0.0.0",
+                "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
+                "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
+                "SPARK_UI_API_KEY": "ui-key-" + "u" * 32,
+            },
+            clear=True,
+        ), patch("spark_cli.cli.current_uid", return_value=1000), \
+            patch("spark_cli.cli.docker_socket_present", return_value=False), \
+            patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}):
+            payload = collect_hosted_security_payload()
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(checks["headless_provider"]["ok"])
+        self.assertIn("ANTHROPIC_API_KEY", checks["headless_provider"]["detail"])
+
+    def test_collect_hosted_security_payload_allows_anthropic_api_key_for_hosted(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SPARK_HOME": "/data/spark",
+                "SPARK_LLM_PROVIDER": "anthropic",
+                "ANTHROPIC_API_KEY": "anthropic-key",
+                "SPARK_SPAWNER_HOST": "0.0.0.0",
+                "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
+                "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
+                "SPARK_UI_API_KEY": "ui-key-" + "u" * 32,
+            },
+            clear=True,
+        ), patch("spark_cli.cli.current_uid", return_value=1000), \
+            patch("spark_cli.cli.docker_socket_present", return_value=False), \
+            patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}):
+            payload = collect_hosted_security_payload()
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertTrue(checks["headless_provider"]["ok"])
+        self.assertIn("chat=anthropic", checks["headless_provider"]["detail"])
+
     def test_collect_hosted_security_payload_flags_weak_hosted_keys(self) -> None:
         with patch.dict(
             os.environ,
