@@ -78,7 +78,7 @@ TELEGRAM_BOT_TOKEN_PATTERN = re.compile(r"\b\d{5,}:[A-Za-z0-9_-]{20,}\b")
 TELEGRAM_BOT_TOKEN_TIMEOUT_SECONDS = 10
 MEMORY_SIDECAR_CHOICES = {"graphiti-kuzu"}
 MEMORY_SIDECAR_DISABLE_CHOICES = {"none", "off", "disabled"}
-DEFAULT_GRAPHITI_KUZU_DB_PATH = "{home}/sidecars/graphiti/kuzu"
+DEFAULT_GRAPHITI_KUZU_DB_PATH = "{home}/sidecars/graphiti/kuzu/graphiti.kuzu"
 DEFAULT_GRAPHITI_GROUP_ID = "spark-memory"
 SAFE_PARENT_ENV_KEYS = {
     "APPDATA",
@@ -3092,7 +3092,7 @@ def initialize_builder_runtime_home(
             if isinstance(graphiti_state, dict) and graphiti_state.get("enabled") is True:
                 backend = str(graphiti_state.get("backend") or "kuzu")
                 db_path = resolve_builder_graphiti_db_path(builder_home, graphiti_state.get("db_path"))
-                db_path.mkdir(parents=True, exist_ok=True)
+                db_path.parent.mkdir(parents=True, exist_ok=True)
                 config_manager.set_path("spark.memory.sidecars.graphiti.enabled", True)
                 config_manager.set_path("spark.memory.sidecars.graphiti.backend", backend)
                 config_manager.set_path("spark.memory.sidecars.graphiti.db_path", str(db_path))
@@ -4473,7 +4473,12 @@ def memory_sidecar_setup_state(
 def resolve_builder_graphiti_db_path(builder_home: Path, configured_path: Any) -> Path:
     raw_path = str(configured_path or DEFAULT_GRAPHITI_KUZU_DB_PATH)
     resolved = raw_path.replace("{home}", str(builder_home)).replace("$SPARK_HOME", str(SPARK_HOME))
-    return Path(resolved).expanduser()
+    path = Path(resolved).expanduser()
+    if path.exists() and path.is_dir():
+        path = path / "graphiti.kuzu"
+    elif not path.suffix:
+        path = path / "graphiti.kuzu"
+    return path
 
 
 def resolve_install_executable(name: str) -> str:

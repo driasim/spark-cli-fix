@@ -3390,7 +3390,7 @@ class SparkCliTests(unittest.TestCase):
             self.assertTrue(graphiti["enabled"])
             self.assertEqual(graphiti["backend"], "kuzu")
             self.assertEqual(graphiti["group_id"], "spark-memory")
-            self.assertEqual(graphiti["db_path"], str(builder_home / "sidecars" / "graphiti" / "kuzu"))
+            self.assertEqual(graphiti["db_path"], str(builder_home / "sidecars" / "graphiti" / "kuzu" / "graphiti.kuzu"))
             self.assertTrue((builder_home / "sidecars" / "graphiti" / "kuzu").exists())
 
     def test_ensure_generated_setup_secrets_adds_relay_secret_for_gateway(self) -> None:
