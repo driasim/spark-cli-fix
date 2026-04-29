@@ -1,6 +1,6 @@
 # Spark Live on Docker, Railway, and VPS
 
-Last updated: 2026-04-28
+Last updated: 2026-04-29
 
 Spark should be easy to test in an environment that is not the operator's laptop. This lane is for realtime sandbox agents: a disposable or persistent container that runs Spark Live, Telegram long polling, Builder, memory, character, and Spawner together.
 
@@ -32,6 +32,33 @@ Railway is a good first target because it gives:
 - simple redeploys when Spark CLI is pinned to a new release.
 
 Any VPS with Docker also works.
+
+## What We Learned From Other Agent Hosts
+
+OpenClaw-style hosted deployments show why browser-first onboarding matters:
+users understand a single `/setup` or control-panel surface much faster than
+SSH plus many terminal commands. Railway templates also proved that a persistent
+volume, setup wizard, model/channel picker, and one public HTTPS URL are a good
+shape for nontechnical users.
+
+The same pattern creates risk if it is not locked down. Spark Live should keep
+these standards:
+
+- one public surface, protected by a user-chosen access key;
+- API routes require `SPARK_BRIDGE_API_KEY`, not just a browser cookie;
+- setup is browser-friendly, but repeat setup is not an unauthenticated open URL;
+- public hosts must set `SPARK_ALLOWED_HOSTS` to exact domains;
+- the runtime drops to a non-root user before starting Spark services;
+- no Docker socket, host root, cloud credentials, SSH keys, browser profiles, or
+  real local `~/.spark` mounts;
+- headless hosts use API-key providers, not interactive OAuth CLIs;
+- every hosted release must pass `spark verify --hosted --deep`.
+
+Hermes-style approval systems are also relevant for future full-access hosted
+agents: dangerous shell/file operations should ask in-chat or in-UI, with
+allowlists that users can inspect and remove. Spark Live is not ready for a
+public "full operating system access" VPS mode until those approvals and
+sandbox boundaries are first-class.
 
 ## Required Environment
 
@@ -141,29 +168,65 @@ SPARK_SPAWNER_PORT=${PORT}
 drops to the non-root `spark` user before setup and runtime work starts.
 `SPARK_ALLOWED_HOSTS` lets Spawner's Vite server accept the generated Railway
 domain without disabling host-header protection for every possible host.
-`SPARK_UI_API_KEY` protects the hosted Spawner UI. Open the Railway URL as
-`https://your-domain.up.railway.app/?uiKey=<SPARK_UI_API_KEY>` to set an httpOnly
-browser cookie. `SPARK_BRIDGE_API_KEY` protects mission-start/control APIs.
+`SPARK_UI_API_KEY` protects the hosted Spawner UI. Open the Railway URL and Spark
+will redirect browser users to `/spark-live/login`; paste the UI key there to set
+an httpOnly browser cookie. The `?uiKey=<SPARK_UI_API_KEY>` route remains
+available for automation/bootstrap, but it should not be the main human path.
+`SPARK_BRIDGE_API_KEY` protects mission-start/control APIs.
 
 After deploy:
 
 1. Open the Railway logs and confirm `Spark Live is running`.
 2. Run `spark verify --hosted` inside the container or over `railway ssh`.
-3. Send `/diagnose` to the sandbox Telegram bot.
-4. Open the Railway URL for Spawner UI with `?uiKey=<SPARK_UI_API_KEY>`.
-5. Send `/remember Railway sandbox works`, then `/recall Railway sandbox`.
-6. Send `/run say exactly OK`.
+3. Run `spark verify --hosted --deep` to start a protected mission smoke and
+   confirm the result reaches the mission board.
+4. Send `/diagnose` to the sandbox Telegram bot.
+5. Open the Railway URL and sign in at `/spark-live/login`.
+6. Send `/remember Railway sandbox works`, then `/recall Railway sandbox`.
+7. Send `/run say exactly OK`.
+
+The hosted deep smoke is intentionally not part of the fast default check. It
+uses the configured mission provider and may spend real LLM credits.
 
 ## Security Rules
 
 - Use a fresh Telegram bot for every hosted sandbox.
 - Keep sandbox API keys scoped and revocable.
+- Prefer separate hosted sandbox provider keys from the operator's main personal keys.
 - Require `SPARK_UI_API_KEY` and `SPARK_BRIDGE_API_KEY` before exposing Spawner on a public host.
 - Do not mount or copy a real local `~/.spark` into hosted containers.
 - Never mount `/var/run/docker.sock`, `/`, `/root`, cloud credential directories, SSH keys, or browser profiles.
 - Prefer Docker hardening flags on VPS: `--cap-drop=ALL`, `--security-opt no-new-privileges`, resource limits, and only one writable Spark state volume.
 - Use a persistent volume only when you intentionally want memory/state to survive redeploys.
 - Rotate tokens after demos if screenshots/logs might have exposed them.
+- Do not expose shell/terminal access in the browser until it is behind a separate
+  admin auth layer and a dangerous-command approval system.
+- Keep public health probes shallow. Deep health checks that reveal providers,
+  mission ids, logs, or memory state must require an admin key.
+
+## Recommended Hosted UX
+
+For Spark to feel easier than current agent VPS setups, the target flow should be:
+
+1. Click "Deploy Spark Live" from the site.
+2. Choose a host template such as Railway for the easiest first path.
+3. Enter one setup password/UI key, Telegram bot token, Telegram admin id, and one LLM provider.
+4. Spark generates bridge secrets, stores them as platform variables, and starts.
+5. Browser opens `/spark-live/login`, then Mission Control shows a guided checklist.
+6. Telegram `/diagnose` and `spark verify --hosted --deep` both pass.
+
+For VPS users who want full control, offer a Docker Compose path with the same
+checks, but do not make them discover firewall, host header, volume ownership,
+and secret rules by accident.
+
+## References Used For This Standard
+
+- OpenClaw Docker docs: non-root image, persistence paths, health checks,
+  gateway bind modes, sandbox behavior, and Docker socket caveats.
+- Railway OpenClaw templates: browser setup, model/channel picker, admin
+  dashboard, persistent `/data`, and single-port deployment pattern.
+- Hermes Agent security docs: dangerous-command approval, gateway allowlists,
+  pairing, and Docker terminal backend resource/security settings.
 
 ## What This Proves
 
