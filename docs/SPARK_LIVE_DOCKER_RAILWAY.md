@@ -52,7 +52,8 @@ these standards:
 - no Docker socket, host root, cloud credentials, SSH keys, browser profiles, or
   real local `~/.spark` mounts;
 - headless hosts use API-key providers, not interactive OAuth CLIs;
-- every hosted release must pass `spark verify --hosted --deep`.
+- every hosted release must pass `spark live verify --quick`; release-candidate
+  pins must also pass `spark live verify` before they are promoted publicly.
 
 Hermes-style approval systems are also relevant for future full-access hosted
 agents: dangerous shell/file operations should ask in-chat or in-UI, with
@@ -135,7 +136,7 @@ Then check:
 
 ```bash
 docker exec -it <container> spark live status
-docker exec -it <container> spark verify --onboarding
+docker exec -it <container> spark live verify --quick
 ```
 
 ## Railway Shape
@@ -178,16 +179,46 @@ available for automation/bootstrap, but it should not be the main human path.
 After deploy:
 
 1. Open the Railway logs and confirm `Spark Live is running`.
-2. Run `spark verify --hosted` inside the container or over `railway ssh`.
-3. Run `spark verify --hosted --deep` to start a protected mission smoke and
-   confirm the result reaches the mission board.
-4. Send `/diagnose` to the sandbox Telegram bot.
+2. Run `spark live status` inside the container or over `railway ssh`.
+3. Run `spark live verify --quick` for the fast hosted security gate.
+4. Run `spark live verify` for a release-candidate gate. It may start a protected
+   mission smoke and spend real LLM credits.
 5. Open the Railway URL and sign in at `/spark-live/login`.
-6. Send `/remember Railway sandbox works`, then `/recall Railway sandbox`.
-7. Send `/run say exactly OK`.
+6. Open `/spark-live/setup` and confirm the checklist shows browser auth,
+   bridge auth, allowed hosts, Telegram, agent LLM, mission LLM, and full-access
+   safety as ready.
+7. Send `/diagnose` to the sandbox Telegram bot.
+8. Send `/remember Railway sandbox works`, then `/recall Railway sandbox`.
+9. Send `/run say exactly OK`.
 
 The hosted deep smoke is intentionally not part of the fast default check. It
 uses the configured mission provider and may spend real LLM credits.
+
+## Release Gate Before Public Pins
+
+Do not point `agent.sparkswarm.ai` or a public release manifest at a new Spark
+Live CLI/image until this gate passes:
+
+```bash
+python -m pytest tests/test_cli.py -q
+python -m spark_cli.cli verify --registry-pins
+python -m spark_cli.cli verify --provenance
+railway up --detach --service spark-live
+railway ssh --service spark-live spark live status
+railway ssh --service spark-live spark live verify --quick
+```
+
+Then check Railway logs for:
+
+- the entrypoint dropping from `root` to the non-root `spark` user;
+- setup completing without raw secret values in output;
+- `spark update --skip-dirty` resolving every pinned module;
+- `spark live start` starting both `spawner-ui` and `spark-telegram-bot`;
+- no `upload-pack: not our ref` errors from a mistyped or unpushed registry pin.
+
+If Docker Desktop is available locally, also run the local Docker smoke first.
+If it is not running, record that as an environment limitation rather than
+calling the release gate complete.
 
 ## Security Rules
 
@@ -198,7 +229,7 @@ uses the configured mission provider and may spend real LLM credits.
 - Make `SPARK_UI_API_KEY` and `SPARK_BRIDGE_API_KEY` different random values,
   at least 24 characters each. Do not use placeholders such as `changeme`,
   `password`, `secret`, or `spark`.
-- Keep hosted secret files private. `spark verify --hosted` fails if a POSIX
+- Keep hosted secret files private. `spark live verify --quick` fails if a POSIX
   `secrets.local.json` is group/world-readable.
 - Do not mount or copy a real local `~/.spark` into hosted containers.
 - Never mount `/var/run/docker.sock`, `/`, `/root`, cloud credential directories, SSH keys, or browser profiles.
@@ -219,7 +250,7 @@ For Spark to feel easier than current agent VPS setups, the target flow should b
 3. Enter one setup password/UI key, Telegram bot token, Telegram admin id, and one LLM provider.
 4. Spark generates bridge secrets, stores them as platform variables, and starts.
 5. Browser opens `/spark-live/login`, then Mission Control shows a guided checklist.
-6. Telegram `/diagnose` and `spark verify --hosted --deep` both pass.
+6. Telegram `/diagnose` and `spark live verify` both pass.
 
 For VPS users who want full control, offer a Docker Compose path with the same
 checks, but do not make them discover firewall, host header, volume ownership,
