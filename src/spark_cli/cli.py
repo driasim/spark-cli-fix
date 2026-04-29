@@ -6421,6 +6421,71 @@ def docker_socket_present() -> bool:
     return Path("/var/run/docker.sock").exists()
 
 
+HOSTED_SENSITIVE_MOUNTPOINTS = {
+    "/",
+    "/root",
+    "/home/spark/.ssh",
+    "/home/spark/.aws",
+    "/home/spark/.azure",
+    "/home/spark/.config/gcloud",
+    "/home/spark/.docker",
+    "/home/spark/.config/chromium",
+    "/home/spark/.config/google-chrome",
+}
+
+HOSTED_CLOUD_CREDENTIAL_ENV_KEYS = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_PROJECT",
+    "AZURE_CLIENT_ID",
+    "AZURE_CLIENT_SECRET",
+    "AZURE_TENANT_ID",
+    "CLOUDFLARE_API_TOKEN",
+    "RAILWAY_TOKEN",
+    "VERCEL_TOKEN",
+    "FLY_API_TOKEN",
+}
+
+
+def decode_mountinfo_path(value: str) -> str:
+    return value.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
+
+
+def mountinfo_mountpoints(text: str) -> list[str]:
+    mountpoints: list[str] = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 5:
+            mountpoints.append(decode_mountinfo_path(parts[4]))
+    return mountpoints
+
+
+def hosted_sensitive_mount_errors(mountinfo_path: Path = Path("/proc/self/mountinfo")) -> list[str]:
+    if os.name == "nt":
+        return []
+    try:
+        mountinfo = mountinfo_path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        return [f"Could not inspect Linux mount table: {exc}."]
+
+    errors: list[str] = []
+    for mountpoint in mountinfo_mountpoints(mountinfo):
+        normalized = mountpoint.rstrip("/") or "/"
+        if normalized in HOSTED_SENSITIVE_MOUNTPOINTS:
+            errors.append(f"Sensitive mountpoint is visible inside hosted Spark: {normalized}.")
+    return errors
+
+
+def hosted_cloud_credential_env_errors(env: dict[str, str] | None = None) -> list[str]:
+    source = env if env is not None else os.environ
+    exposed = [key for key in sorted(HOSTED_CLOUD_CREDENTIAL_ENV_KEYS) if source.get(key)]
+    return [f"Hosted Spark should not receive cloud/admin credential env vars: {', '.join(exposed)}."] if exposed else []
+
+
 def hosted_unsafe_home_paths() -> set[str]:
     unsafe = {"/", "/root"}
     try:
@@ -6643,6 +6708,8 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
     bridge_key = os.environ.get("SPARK_BRIDGE_API_KEY") or ""
     hosted_key_errors = hosted_api_key_strength_errors(ui_key, bridge_key)
     secret_file_errors = hosted_secret_file_permission_errors()
+    sensitive_mount_errors = hosted_sensitive_mount_errors()
+    cloud_credential_errors = hosted_cloud_credential_env_errors()
     spawner_host = (os.environ.get("SPARK_SPAWNER_HOST") or "").strip()
     public_bind = spawner_host in {"0.0.0.0", "::"} or bool(allowed_hosts)
     runtime_uids = tracked_runtime_uids()
@@ -6678,6 +6745,28 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
                 else "Docker socket is visible inside the container; this is effectively host-root access."
             ),
             "repair": "Remove any /var/run/docker.sock mount before running hosted Spark.",
+        },
+        {
+            "name": "no_sensitive_mounts",
+            "ok": not sensitive_mount_errors,
+            "required": True,
+            "detail": (
+                "; ".join(sensitive_mount_errors)
+                if sensitive_mount_errors
+                else "No obvious SSH, browser profile, cloud credential, root, or Docker config mounts are visible."
+            ),
+            "repair": "Mount only the Spark state volume, normally /data/spark. Do not mount host homes, SSH keys, cloud config, browser profiles, or /.",
+        },
+        {
+            "name": "no_cloud_admin_credentials",
+            "ok": not cloud_credential_errors,
+            "required": True,
+            "detail": (
+                "; ".join(cloud_credential_errors)
+                if cloud_credential_errors
+                else "No cloud/admin deployment tokens are present in the hosted Spark runtime env."
+            ),
+            "repair": "Remove cloud deployment credentials from the Spark Live service env; keep only Spark/LLM/Telegram secrets needed by the agent.",
         },
         {
             "name": "spark_home_boundary",

@@ -222,6 +222,9 @@ from spark_cli.cli import (
     write_windows_startup_script,
     write_runtime_shim,
     telegram_profile_secret_id,
+    hosted_cloud_credential_env_errors,
+    hosted_sensitive_mount_errors,
+    mountinfo_mountpoints,
 )
 from spark_cli.security.approval import CommandContext, approval_required_for_command
 
@@ -6282,6 +6285,51 @@ class SparkCliTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertFalse(checks["hosted_secret_file_permissions"]["ok"])
             self.assertIn("0600", checks["hosted_secret_file_permissions"]["detail"])
+
+    def test_hosted_sensitive_mounts_parse_linux_mountinfo(self) -> None:
+        mountinfo = (
+            "36 29 0:32 / /data/spark rw,relatime - ext4 /dev/root rw\n"
+            "37 29 0:33 / /home/spark/.ssh rw,relatime - ext4 /dev/root rw\n"
+            "38 29 0:34 / /home/spark/My\\040Files rw,relatime - ext4 /dev/root rw\n"
+        )
+        self.assertIn("/home/spark/My Files", mountinfo_mountpoints(mountinfo))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mountinfo_path = Path(temp_dir) / "mountinfo"
+            mountinfo_path.write_text(mountinfo, encoding="utf-8")
+            with patch("spark_cli.cli.os.name", "posix"):
+                errors = hosted_sensitive_mount_errors(mountinfo_path)
+        self.assertIn("Sensitive mountpoint is visible inside hosted Spark: /home/spark/.ssh.", errors)
+
+    def test_collect_hosted_security_payload_flags_cloud_admin_credentials(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SPARK_HOME": "/data/spark",
+                "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_SPAWNER_HOST": "0.0.0.0",
+                "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
+                "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
+                "SPARK_UI_API_KEY": "ui-key-" + "u" * 32,
+                "RAILWAY_TOKEN": "railway-admin-token",
+            },
+            clear=True,
+        ), patch("spark_cli.cli.current_uid", return_value=1000), \
+            patch("spark_cli.cli.docker_socket_present", return_value=False), \
+            patch("spark_cli.cli.hosted_sensitive_mount_errors", return_value=[]), \
+            patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}):
+            payload = collect_hosted_security_payload()
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(payload["ok"])
+        self.assertFalse(checks["no_cloud_admin_credentials"]["ok"])
+        self.assertIn("RAILWAY_TOKEN", checks["no_cloud_admin_credentials"]["detail"])
+
+    def test_hosted_cloud_credential_env_errors_are_specific(self) -> None:
+        self.assertEqual(hosted_cloud_credential_env_errors({}), [])
+        errors = hosted_cloud_credential_env_errors({"AWS_ACCESS_KEY_ID": "key", "SPARK_UI_API_KEY": "allowed"})
+        self.assertEqual(len(errors), 1)
+        self.assertIn("AWS_ACCESS_KEY_ID", errors[0])
+        self.assertNotIn("SPARK_UI_API_KEY", errors[0])
 
     def test_collect_hosted_security_payload_deep_appends_mission_smoke(self) -> None:
         with patch.dict(
