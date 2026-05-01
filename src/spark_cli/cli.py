@@ -10361,6 +10361,35 @@ def onboarding_guide_payload() -> dict[str, Any]:
             { "command": "spark secrets list", "use": "Confirm configured secret ids without printing secret values." },
             { "command": "spark setup", "use": "Rerun onboarding safely when changing bot, admin ids, or LLM provider." },
         ],
+        "command_reference": [
+            { "command": "spark list", "use": "List local Spark modules with manifests." },
+            { "command": "spark install <target>", "use": "Install a module by registry name, local path, or git URL." },
+            { "command": "spark setup [bundle]", "use": "Configure a starter bundle; installs login autostart by default unless --no-autostart is passed." },
+            { "command": "spark status [--json]", "use": "Run module healthchecks with repair hints." },
+            { "command": "spark doctor [--json]", "use": "Run diagnostic status output." },
+            { "command": "spark doctor llm \"<problem>\"", "use": "Ask the configured LLM for a redacted repair plan." },
+            { "command": "spark support bundle", "use": "Create a local redacted support bundle." },
+            { "command": "spark verify [--onboarding|--deep|--installers]", "use": "Verify launch-critical wiring, onboarding, deeper runtime checks, or installer integrity." },
+            { "command": "spark fix <target>", "use": "Run targeted repair guidance for telegram, secrets, spawner, providers, memory, live, update, or autostart." },
+            { "command": "spark providers list|status|test|recommend", "use": "Inspect, test, and choose LLM provider wiring." },
+            { "command": "spark recommend llms|providers", "use": "Recommend Spark setup choices." },
+            { "command": "spark security audit", "use": "Audit local security posture." },
+            { "command": "spark approval classify -- <command>", "use": "Classify whether a command requires approval." },
+            { "command": "spark telegram connect [profile]", "use": "Connect or rotate a Telegram bot profile token." },
+            { "command": "spark update [target]", "use": "Refresh installed modules from current source paths." },
+            { "command": "spark uninstall [target]", "use": "Remove installed modules and generated config." },
+            { "command": "spark start [target]", "use": "Start modules or starter bundles." },
+            { "command": "spark stop [target]", "use": "Stop tracked Spark processes." },
+            { "command": "spark restart [target]", "use": "Restart modules or starter bundles." },
+            { "command": "spark live status|start|run|restart|stop|logs|verify", "use": "Control and inspect Spark Live." },
+            { "command": "spark autostart install|on|uninstall|off|profile|status", "use": "Control OS login startup and per-profile autostart." },
+            { "command": "spark guide [--advanced|--json]", "use": "Show onboarding, advanced guidance, and this command reference." },
+            { "command": "spark init <name>", "use": "Scaffold a new Spark module." },
+            { "command": "spark search [query]", "use": "Search the local blessed registry." },
+            { "command": "spark config get|set|unset|list", "use": "Read or write user config at ~/.spark/config/config.json." },
+            { "command": "spark secrets list|set|get|delete", "use": "Manage stored secrets without exposing values by default." },
+            { "command": "spark logs <module>", "use": "Show process logs for an installed module." },
+        ],
         "troubleshooting": [
             "Bot receives no messages: make sure only one polling process is running, then restart spark-telegram-bot.",
             "Second bot receives no messages: run spark restart spark-telegram-bot --profile <profile> and check spark logs spark-telegram-bot --profile <profile>.",
@@ -10425,6 +10454,10 @@ def cmd_guide(args: argparse.Namespace) -> int:
         print("")
         print("Useful Spark CLI commands")
         for item in payload["operator_commands"]:
+            print(f"   {item['command']}: {item['use']}")
+        print("")
+        print("Full command reference")
+        for item in payload["command_reference"]:
             print(f"   {item['command']}: {item['use']}")
         print("")
         print("Troubleshooting")

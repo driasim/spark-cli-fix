@@ -3397,6 +3397,8 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("spark secrets list", output)
         self.assertIn("spark fix autostart", output)
         self.assertIn("spark autostart off", output)
+        self.assertIn("Full command reference", output)
+        self.assertIn("spark approval classify -- <command>", output)
 
     def test_guide_json_is_agent_readable(self) -> None:
         args = build_parser().parse_args(["guide", "--json"])
@@ -3420,6 +3422,16 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("spark fix autostart", operator_commands)
         self.assertIn("spark autostart on --now", operator_commands)
         self.assertIn("spark autostart off", operator_commands)
+        command_reference = {item["command"] for item in payload["command_reference"]}
+        parser_commands = set(build_parser()._subparsers._group_actions[0].choices)
+        documented_top_level = {
+            command.split()[1]
+            for command in command_reference
+            if command.startswith("spark ") and len(command.split()) > 1
+        }
+        self.assertEqual(parser_commands - documented_top_level, set())
+        self.assertIn("spark approval classify -- <command>", command_reference)
+        self.assertIn("spark autostart install|on|uninstall|off|profile|status", command_reference)
 
     def test_setup_default_bundle_registers_starter_stack(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

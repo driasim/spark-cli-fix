@@ -339,24 +339,36 @@ Use `spark <cmd> --help` for full flags.
 | Command | What it does |
 |---|---|
 | `spark list` | List discoverable modules |
-| `spark init <name>` | Scaffold a new module |
 | `spark install <target>` | Install by registry name, bundle, local path, or git URL |
 | `spark setup [bundle]` | Interactive preflight and secret prompts for a bundle; defaults to `telegram-starter` |
 | `spark setup --profile <name>` | Add a named Telegram bot profile |
+| `spark status [--json]` | Run module healthchecks with repair hints |
+| `spark doctor [--json]` | Diagnostic variant of status |
+| `spark doctor llm "<problem>"` | Ask the configured LLM for a redacted local repair plan |
+| `spark support bundle` | Create a local redacted support bundle |
+| `spark verify [--onboarding\|--deep\|--installers]` | Verify launch wiring, onboarding, runtime checks, or installer integrity |
+| `spark fix <target>` | Repair checklist for `telegram`, `secrets`, `spawner`, `providers`, `memory`, `live`, `update`, or `autostart` |
+| `spark providers list\|status\|test\|recommend` | Inspect, test, and choose LLM provider wiring |
+| `spark recommend llms\|providers` | Recommend setup choices |
+| `spark security audit` | Audit local security posture |
+| `spark approval classify -- <command>` | Classify whether a command requires approval |
+| `spark telegram connect [profile]` | Connect or rotate a Telegram bot profile token |
 | `spark update [target]` | Re-run install commands and pull managed git clones |
 | `spark uninstall [target]` | Stop, remove generated env, delete clone, and rotate secrets |
 | `spark start [target]` | Topological launch using `needs.modules` order |
 | `spark start spark-telegram-bot --profile <name>` | Start one named Telegram bot profile |
 | `spark stop [target]` | Reverse-topological stop |
+| `spark restart [target]` | Restart modules or starter bundles |
+| `spark live status\|start\|run\|restart\|stop\|logs\|verify` | Control and inspect Spark Live |
 | `spark autostart on --now` | Start Spark now and automatically at computer login |
 | `spark autostart status` | Show whether the login hook is installed and points at this Spark home |
 | `spark fix autostart` | Diagnose missing/stale login hooks, permissions, and manual Telegram profiles |
 | `spark autostart profile <name> off` | Keep one Telegram profile manual while Spark autostart stays on |
 | `spark autostart off` | Remove the login hook |
-| `spark status [--json]` | Run module healthchecks with repair hints |
-| `spark doctor [--json]` | Diagnostic variant of status |
-| `spark logs <module>` | Tail `~/.spark/logs/<module>/process.log` |
+| `spark guide [--advanced\|--json]` | Show onboarding, advanced guidance, and command reference |
+| `spark init <name>` | Scaffold a new module |
 | `spark search [query]` | Browse the registry |
+| `spark logs <module>` | Tail `~/.spark/logs/<module>/process.log` |
 | `spark secrets list|set|get|delete` | Keychain-backed secret store |
 | `spark config get|set|unset|list` | User config at `~/.spark/config/config.json` |
 
