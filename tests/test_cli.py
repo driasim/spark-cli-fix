@@ -2964,6 +2964,41 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn("Installed: yes", text)
             self.assertIn("Systemd service installed: no", text)
             self.assertIn("Linux desktop fallback installed: yes", text)
+            self.assertIn("Linux desktop fallback current command: no", text)
+            self.assertIn("Repair: spark autostart install --now", text)
+
+    def test_autostart_status_linux_reports_current_service_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service_path = Path(tmp_dir) / "spark-telegram-agent.service"
+            xdg_path = Path(tmp_dir) / "spark-telegram-agent.desktop"
+            service_path.write_text(
+                render_systemd_autostart_unit(
+                    target="telegram-starter",
+                    start_command="/tmp/spark start --allow-boot-warnings telegram-starter",
+                    stop_command="/tmp/spark stop telegram-starter",
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_helper(command: list[str]) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(command, 0, "enabled\n", "")
+
+            args = build_parser().parse_args(["autostart", "status"])
+            with patch("spark_cli.cli.sys.platform", "linux"), \
+                 patch("spark_cli.cli.running_under_wsl", return_value=False), \
+                 patch("spark_cli.cli.linux_autostart_scope", return_value="user"), \
+                 patch("spark_cli.cli.linux_autostart_path", return_value=service_path), \
+                 patch("spark_cli.cli.linux_xdg_autostart_path", return_value=xdg_path), \
+                 patch("spark_cli.cli.spark_invocation_args", return_value=["/tmp/spark"]), \
+                 patch("spark_cli.cli.load_json", return_value={}), \
+                 patch("spark_cli.cli.run_autostart_helper", side_effect=fake_helper), \
+                 patch("sys.stdout", new_callable=StringIO) as output:
+                self.assertEqual(args.func(args), 0)
+
+            text = output.getvalue()
+            self.assertIn("Systemd service current command: yes", text)
+            self.assertIn("Systemd service current Spark home: yes", text)
+            self.assertNotIn("Systemd service warning: autostart command does not match", text)
 
     def test_autostart_install_macos_replaces_existing_launch_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

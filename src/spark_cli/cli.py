@@ -9198,6 +9198,63 @@ def install_wsl_windows_login_bridge(start_command: str) -> tuple[Path | None, b
     return startup_path, True
 
 
+def autostart_file_audit(path: Path, *, expected_command: str, expected_home: Path | None = None) -> dict[str, Any]:
+    audit: dict[str, Any] = {
+        "path": str(path),
+        "exists": path.exists(),
+        "readable": False,
+        "current_command": None,
+        "current_home": None,
+        "parent_private": None,
+        "warnings": [],
+    }
+    if not path.exists():
+        return audit
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        audit["warnings"].append(f"could not read autostart file: {exc}")
+        return audit
+    audit["readable"] = True
+    audit["current_command"] = expected_command in content
+    home = expected_home or SPARK_HOME
+    audit["current_home"] = str(home) in content or expected_command in content
+    try:
+        parent_mode = stat.S_IMODE(path.parent.stat().st_mode)
+    except OSError as exc:
+        audit["warnings"].append(f"could not inspect parent directory permissions: {exc}")
+    else:
+        audit["parent_private"] = (parent_mode & 0o022) == 0
+        if not audit["parent_private"]:
+            audit["warnings"].append(
+                f"parent directory is group/world writable ({oct(parent_mode)}): {path.parent}"
+            )
+    if audit["current_command"] is False:
+        audit["warnings"].append("autostart command does not match the current Spark startup command")
+    if audit["current_home"] is False:
+        audit["warnings"].append("autostart file does not point at the current Spark home")
+    return audit
+
+
+def print_autostart_file_audit(label: str, path: Path, *, expected_command: str) -> list[str]:
+    audit = autostart_file_audit(path, expected_command=expected_command)
+    if not audit["exists"]:
+        return []
+    if audit["readable"]:
+        print(f"{label} current command: " + ("yes" if audit["current_command"] else "no"))
+        print(f"{label} current Spark home: " + ("yes" if audit["current_home"] else "no"))
+        if audit["parent_private"] is not None:
+            print(f"{label} parent private: " + ("yes" if audit["parent_private"] else "no"))
+    else:
+        print(f"{label} readable: no")
+    warnings = [str(item) for item in audit.get("warnings", [])]
+    for warning in warnings:
+        print(f"{label} warning: {warning}")
+    if warnings:
+        print("Repair: spark autostart install --now")
+    return warnings
+
+
 def cmd_autostart_install(args: argparse.Namespace) -> int:
     ensure_state_dirs()
     target = validate_autostart_target(args.target or "telegram-starter")
@@ -9439,6 +9496,7 @@ def cmd_autostart_status(_: argparse.Namespace) -> int:
     configured_text = ", ".join(configured) if configured else "none"
     manual = manual_telegram_profiles()
     manual_text = ", ".join(manual) if manual else "none"
+    expected_start_command = autostart_shell_command("start", "telegram-starter")
     if sys.platform.startswith("linux") and running_under_wsl():
         startup_path = wsl_windows_startup_script_path()
         installed = bool(startup_path and startup_path.exists())
@@ -9447,6 +9505,8 @@ def cmd_autostart_status(_: argparse.Namespace) -> int:
         print(f"Telegram profiles configured: {configured_text}")
         print(f"Telegram profiles in autostart: {profile_text}")
         print(f"Telegram profiles manual/off: {manual_text}")
+        if startup_path is not None:
+            print_autostart_file_audit("WSL Windows-login fallback", startup_path, expected_command=expected_start_command)
         return 0
 
     if sys.platform.startswith("linux"):
@@ -9467,6 +9527,9 @@ def cmd_autostart_status(_: argparse.Namespace) -> int:
             result = run_autostart_helper(systemctl_command(scope, "is-enabled", service_path.name))
             enabled = (result.stdout or result.stderr or "").strip() or f"exit {result.returncode}"
             print(f"Enabled: {enabled}")
+            print_autostart_file_audit("Systemd service", service_path, expected_command=expected_start_command)
+        if xdg_installed:
+            print_autostart_file_audit("Linux desktop fallback", xdg_path, expected_command=expected_start_command)
         return 0
     if sys.platform == "darwin":
         plist_path = macos_autostart_path()
@@ -9492,6 +9555,7 @@ def cmd_autostart_status(_: argparse.Namespace) -> int:
                     else:
                         print("Current Spark home: no")
                         print(f"LaunchAgent Spark home: {configured_home}")
+            print_autostart_file_audit("LaunchAgent", plist_path, expected_command=expected_start_command)
         return 0
     if sys.platform == "win32":
         result = run_autostart_helper(["schtasks", "/Query", "/TN", AUTOSTART_WINDOWS_TASK_NAME])
@@ -9508,6 +9572,8 @@ def cmd_autostart_status(_: argparse.Namespace) -> int:
         print(f"Telegram profiles configured: {configured_text}")
         print(f"Telegram profiles in autostart: {profile_text}")
         print(f"Telegram profiles manual/off: {manual_text}")
+        if startup_installed:
+            print_autostart_file_audit("Startup fallback", startup_path, expected_command=expected_start_command)
         return 0
     raise SystemExit(f"Autostart is not supported on this platform yet: {sys.platform}")
 
