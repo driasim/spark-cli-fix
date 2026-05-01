@@ -3075,6 +3075,11 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("--exec sh -lc", script)
         self.assertIn("/home/example/.spark/bin/spark start telegram-starter", script)
 
+    def test_wsl_autostart_render_fails_without_resolved_distro(self) -> None:
+        with patch("spark_cli.cli.wsl_distro_name", return_value=None):
+            with self.assertRaises(ValueError):
+                render_wsl_windows_startup_script("/home/example/.spark/bin/spark start telegram-starter")
+
     def test_autostart_install_wsl_writes_windows_login_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             startup_script = Path(tmp_dir) / "spark-telegram-agent.vbs"
@@ -3100,6 +3105,23 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn("--exec sh -lc", content)
             self.assertIn("/home/example/.spark/bin/spark start --allow-boot-warnings telegram-starter", content)
             self.assertEqual(commands, [["sh", "-lc", "/home/example/.spark/bin/spark start --allow-boot-warnings telegram-starter"]])
+
+    def test_autostart_install_wsl_fails_closed_without_distro_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            startup_script = Path(tmp_dir) / "spark-telegram-agent.vbs"
+
+            args = build_parser().parse_args(["autostart", "install"])
+            with patch("spark_cli.cli.sys.platform", "linux"), \
+                 patch("spark_cli.cli.running_under_wsl", return_value=True), \
+                 patch("spark_cli.cli.wsl_windows_startup_script_path", return_value=startup_script), \
+                 patch("spark_cli.cli.wsl_distro_name", return_value=None), \
+                 patch("spark_cli.cli.spark_invocation_args", return_value=["/home/example/.spark/bin/spark"]), \
+                 patch("spark_cli.cli.autostart_telegram_profiles", return_value=[]), \
+                 patch("sys.stdout", new_callable=StringIO) as output:
+                self.assertEqual(args.func(args), 1)
+
+            self.assertFalse(startup_script.exists())
+            self.assertIn("WSL distro name could not be determined", output.getvalue())
 
     def test_autostart_status_wsl_reports_windows_login_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

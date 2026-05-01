@@ -9057,8 +9057,27 @@ def running_under_wsl() -> bool:
     return "microsoft" in release or "wsl" in release
 
 
-def wsl_distro_name() -> str:
-    return os.environ.get("WSL_DISTRO_NAME", "").strip() or "Ubuntu"
+def available_wsl_distros() -> list[str]:
+    result = run_autostart_helper(["wsl.exe", "-l", "-q"])
+    if result.returncode != 0:
+        return []
+    output = (result.stdout or "").replace("\x00", "")
+    distros: list[str] = []
+    for line in output.splitlines():
+        distro = line.strip().strip("*").strip()
+        if distro and distro.lower() != "windows subsystem for linux distributions:":
+            distros.append(distro)
+    return distros
+
+
+def wsl_distro_name() -> str | None:
+    configured = os.environ.get("WSL_DISTRO_NAME", "").strip()
+    if configured:
+        return configured
+    distros = available_wsl_distros()
+    if len(distros) == 1:
+        return distros[0]
+    return None
 
 
 def windows_path_to_wsl_path(path_text: str) -> Path:
@@ -9092,11 +9111,14 @@ def wsl_windows_startup_script_path() -> Path | None:
 
 
 def render_wsl_windows_startup_script(start_command: str, *, distro_name: str | None = None) -> str:
+    resolved_distro = distro_name or wsl_distro_name()
+    if not resolved_distro:
+        raise ValueError("Could not determine the WSL distro name for Windows-login autostart.")
     command = subprocess.list2cmdline(
         [
             "wsl.exe",
             "-d",
-            distro_name or wsl_distro_name(),
+            resolved_distro,
             "--cd",
             str(Path.home()),
             "--exec",
@@ -9193,8 +9215,11 @@ def install_wsl_windows_login_bridge(start_command: str) -> tuple[Path | None, b
     startup_path = wsl_windows_startup_script_path()
     if startup_path is None:
         return None, False
+    distro_name = wsl_distro_name()
+    if not distro_name:
+        return startup_path, False
     startup_path.parent.mkdir(parents=True, exist_ok=True)
-    startup_path.write_text(render_wsl_windows_startup_script(start_command), encoding="ascii")
+    startup_path.write_text(render_wsl_windows_startup_script(start_command, distro_name=distro_name), encoding="ascii")
     return startup_path, True
 
 
@@ -9268,7 +9293,11 @@ def cmd_autostart_install(args: argparse.Namespace) -> int:
             print(f"Installed WSL Windows-login fallback: {startup_path}")
         else:
             failures += 1
-            print("Could not install WSL Windows-login fallback because Windows APPDATA was unavailable.")
+            if startup_path is None:
+                print("Could not install WSL Windows-login fallback because Windows APPDATA was unavailable.")
+            else:
+                print("Could not install WSL Windows-login fallback because the WSL distro name could not be determined.")
+                print("Run from inside the target WSL distro, or set WSL_DISTRO_NAME and try again.")
         if args.now:
             now_command = ["sh", "-lc", start_command]
             result = run_autostart_helper(now_command)
