@@ -297,6 +297,15 @@ class SparkCliTests(unittest.TestCase):
         self.assertTrue(decision.requires_approval)
         self.assertEqual(decision.action_class, "process_autostart_mutation")
 
+    def test_approval_classifier_flags_setup_default_autostart(self) -> None:
+        decision = approval_required_for_command(["spark", "setup", "telegram-starter"], CommandContext())
+        self.assertTrue(decision.requires_approval)
+        self.assertEqual(decision.action_class, "process_autostart_mutation")
+
+    def test_approval_classifier_allows_setup_without_autostart(self) -> None:
+        decision = approval_required_for_command(["spark", "setup", "--no-autostart"], CommandContext())
+        self.assertFalse(decision.requires_approval)
+
     def test_approval_classifier_flags_destructive_delete(self) -> None:
         decision = approval_required_for_command(["rm", "-rf", "/tmp/spark-test"], CommandContext())
         self.assertTrue(decision.requires_approval)

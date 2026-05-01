@@ -298,6 +298,16 @@ def approval_required_for_command(argv: list[str], context: CommandContext | Non
 
     if first == "spark" and lowered[1:3] == ["autostart", "status"]:
         return _decision(parts, ctx, "none", "none", "`spark autostart status` is read-only.")
+    if first == "spark" and second == "setup" and "--no-autostart" not in lowered:
+        return _decision(
+            parts,
+            ctx,
+            "process_autostart_mutation",
+            "medium",
+            "`spark setup` installs OS login autostart by default.",
+            target_display="spark setup",
+            confirmation_phrase="approve autostart change",
+        )
     if first == "spark" and second == "autostart":
         return _decision(
             parts,
