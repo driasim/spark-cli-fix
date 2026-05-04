@@ -686,7 +686,11 @@ checkout_cli_ref() {
     return
   fi
   if printf '%s' "$SPARK_CLI_REF" | grep -Eq '^[0-9a-f]{40}$'; then
-    git -C "$target" fetch --depth=1 origin '+refs/heads/*:refs/remotes/origin/*'
+    if [ "$(git -C "$target" rev-parse --is-shallow-repository 2>/dev/null || printf false)" = "true" ]; then
+      git -C "$target" fetch --unshallow origin
+    else
+      git -C "$target" fetch origin
+    fi
     git -C "$target" checkout "$SPARK_CLI_REF"
     return
   fi

@@ -476,9 +476,14 @@ function Checkout-CliRef {
         }
     }
     if ($Ref -match "^[0-9a-f]{40}$") {
-        git -C $Target fetch --depth=1 origin "+refs/heads/*:refs/remotes/origin/*"
+        $isShallow = (& git -C $Target rev-parse --is-shallow-repository 2>$null)
+        if ($isShallow -eq "true") {
+            git -C $Target fetch --unshallow origin
+        } else {
+            git -C $Target fetch origin
+        }
         if ($LASTEXITCODE -ne 0) {
-            throw "Could not fetch Spark CLI branch heads for commit ref: $Ref"
+            throw "Could not fetch Spark CLI history for commit ref: $Ref"
         }
         git -C $Target checkout $Ref
         if ($LASTEXITCODE -ne 0) {
