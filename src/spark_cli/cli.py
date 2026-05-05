@@ -4505,7 +4505,7 @@ def print_setup_next_steps(
         print("Spark is configured, but not started yet.")
     print("")
     print(f"Telegram: {telegram_label}")
-    print("Access: level 3 recommended")
+    print("Allowed by default: chat, memory, diagnostics, public research, and approved missions.")
     print(f"Autostart: {'enabled' if autostart_enabled else 'disabled'}")
     print("")
     print("Open Telegram and send:")
@@ -6098,7 +6098,7 @@ def runtime_env_contract_errors(modules: dict[str, Module] | None = None) -> lis
 def agency_guardrail_errors() -> list[str]:
     errors: list[str] = []
     if str(os.environ.get("SPARK_ALLOW_HOSTED_FULL_ACCESS") or "").strip().lower() in {"1", "true", "yes", "on"}:
-        errors.append("SPARK_ALLOW_HOSTED_FULL_ACCESS is enabled; hosted access level 4 should stay off unless privately approval-gated.")
+        errors.append("SPARK_ALLOW_HOSTED_FULL_ACCESS is enabled; hosted full-access mode should stay off unless privately approval-gated.")
     return errors
 
 
@@ -8744,7 +8744,7 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
 def onboarding_checklist() -> list[str]:
     return [
         "Open Telegram and send /start to your Spark bot.",
-        "Choose an access level when Spark asks; /access 3 is recommended for most users.",
+        "Choose what Spark can do when asked; most users should allow chat, memory, diagnostics, public research, and approved missions.",
         "Run spark providers test --role chat and confirm the selected LLM replies with PING_OK.",
         "Send /diagnose in Telegram and confirm Telegram, LLM, memory, and Spawner look OK.",
         "Send /remember I like concise warm replies, then /recall concise warm replies.",
@@ -10957,7 +10957,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
             ]},
             {"title": "Finish in Telegram", "steps": [
                 "Send /start to your Spark bot.",
-                "Choose /access 3 when Spark asks. You can change this anytime with /access 1, /access 2, /access 3, or /access 4.",
+                "Choose what Spark can do when asked. Most users should allow chat, memory, diagnostics, public research, and approved missions.",
                 "Send /diagnose and make sure Telegram, LLM, memory, and Spawner look OK.",
                 "Send /remember I like concise warm replies, then /recall concise warm replies.",
                 "Try a tiny build with /run say exactly OK, then check /board.",
@@ -10966,7 +10966,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
         "start": [
             "spark autostart on --now",
             "Open Telegram and send /start to your Spark bot.",
-            "Choose /access 3 when Spark asks, unless you want less or more access.",
+            "Choose what Spark can do when asked; you can keep it chat-only or allow approved missions.",
             "Send /diagnose in Telegram.",
             "spark verify --onboarding",
         ],
@@ -10991,7 +10991,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
             { "command": "/recall <query>", "use": "Search your Spark memory when available." },
             { "command": "/run <goal>", "use": "Create a Spawner mission from Telegram." },
             { "command": "/board", "use": "Show current mission board/status." },
-            { "command": "/access <1|2|3|4>", "use": "Choose how much tool access Spark has in this Telegram chat." },
+            { "command": "/access <1|2|3|4>", "use": "Adjust what Spark may do in this Telegram chat." },
             { "command": "/mission status <id>", "use": "Inspect a mission." },
             { "command": "normal message", "use": "Ask Spark to answer through the configured LLM provider." },
         ],
@@ -10999,7 +10999,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
             { "command": "spark status", "use": "Human-readable health check and repair hints." },
             { "command": "spark live status", "use": "Check whether Spark Live is running quietly in the background." },
             { "command": "spark verify", "use": "Launch-readiness proof for modules, LLM roles, Telegram long polling, Builder memory, Spawner relay, and running processes." },
-            { "command": "spark verify --onboarding", "use": "First-user checklist for Telegram, access level, memory, and a tiny Spawner mission." },
+            { "command": "spark verify --onboarding", "use": "First-user checklist for Telegram, allowed actions, memory, and a tiny Spawner mission." },
             { "command": "spark fix telegram", "use": "Targeted quiet-bot repair checklist: token, admin ids, memory bridge, LLM roles, process, and logs." },
             { "command": "spark fix autostart", "use": "Targeted login-startup repair checklist: installed hooks, stale paths, permissions, and Telegram profile selection." },
             { "command": "spark fix spawner", "use": "Targeted repair checklist when /run, Kanban, Canvas, or Mission Control is not reachable." },
@@ -11087,7 +11087,7 @@ def cmd_guide(args: argparse.Namespace) -> int:
     for item in payload["operator_commands"]:
         if item["command"] in {"spark live status", "spark verify --onboarding", "spark fix telegram", "spark fix spawner", "spark logs spark-telegram-bot", "spark logs spawner-ui"}:
             print(f"   {item['command']}: {item['use']}")
-    print("   spark guide --advanced: Provider splits, multiple bots, access levels, modules, and support commands.")
+    print("   spark guide --advanced: Provider splits, multiple bots, allowed actions, modules, and support commands.")
     print("")
     if getattr(args, "advanced", False):
         print("Advanced setup")
@@ -11102,9 +11102,9 @@ def cmd_guide(args: argparse.Namespace) -> int:
         for item in payload["multi_bot_profiles"]:
             print(f"   - {item}")
         print("")
-        print("Access levels")
+        print("What Spark can do")
         for item in payload["access_levels"]:
-            print(f"   Level {item['level']}: {item['about']}")
+            print(f"   - {item['about']}")
         print("   Change it in Telegram with /access <1|2|3|4>.")
         print("")
         print("How the modules work together")
@@ -11517,7 +11517,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     guide_parser = subparsers.add_parser("guide", help="Show first-run BotFather, LLM, module, and Telegram command guide")
     guide_parser.add_argument("--json", action="store_true", help="Emit the guide as structured JSON")
-    guide_parser.add_argument("--advanced", action="store_true", help="Show provider splits, multiple bots, access levels, modules, and support commands")
+    guide_parser.add_argument("--advanced", action="store_true", help="Show provider splits, multiple bots, allowed actions, modules, and support commands")
     guide_parser.set_defaults(func=cmd_guide)
 
     init_parser = subparsers.add_parser("init", help="Scaffold a new Spark module in a directory")
