@@ -26,14 +26,14 @@
     },
     "spark-telegram-bot": {
       "source": "https://github.com/vibeforge1111/spark-telegram-bot",
-      "commit": "7afefb2c977743a0b88adadf01f6c061c7772354",
+      "commit": "98e12b82ec89b4d68d1fceb355f82e07cc07b829",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Telegram ingress gateway for the Spark starter stack",
       "attestation": {
         "type": "git-commit-pin-v1",
         "source": "https://github.com/vibeforge1111/spark-telegram-bot",
-        "commit": "7afefb2c977743a0b88adadf01f6c061c7772354"
+        "commit": "98e12b82ec89b4d68d1fceb355f82e07cc07b829"
       }
     },
     "spark-intelligence-builder": {

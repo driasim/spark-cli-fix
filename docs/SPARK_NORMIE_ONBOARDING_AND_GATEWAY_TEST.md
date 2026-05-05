@@ -186,6 +186,8 @@ Before shipping installer changes, run at least one sandbox setup with temp stat
 ```bash
 SPARK_HOME="$(mktemp -d)" python -m spark_cli.cli setup \
   --non-interactive \
+  --no-autostart \
+  --no-start-now \
   --skip-install-commands \
   --skip-runtime-check \
   --secret telegram.bot_token=123456:test-token \
