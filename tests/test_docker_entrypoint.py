@@ -25,3 +25,4 @@ def test_live_docker_entrypoint_supports_external_telegram_ingress() -> None:
 def test_live_docker_entrypoint_disables_os_autostart() -> None:
     script = (Path(__file__).resolve().parents[1] / "docker" / "live" / "entrypoint.sh").read_text(encoding="utf-8")
     assert "--no-autostart" in script
+    assert "--no-start-now" in script

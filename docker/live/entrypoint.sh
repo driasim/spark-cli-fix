@@ -109,6 +109,7 @@ setup_args=(
   telegram-starter
   --non-interactive
   --no-autostart
+  --no-start-now
   --run-install-commands
   --llm-provider
   "$provider"
