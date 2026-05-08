@@ -4860,6 +4860,54 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(spawner_env["CODEX_PATH"], "/usr/local/bin/codex")
         self.assertEqual(envs["spark-intelligence-builder"]["SPARK_LLM_PROVIDER"], "codex")
 
+    def test_build_module_envs_forwards_hosted_spawner_control_env(self) -> None:
+        gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
+        builder = make_module("spark-intelligence-builder", ["spark.runtime"])
+        spawner = make_module("spawner-ui", ["mission.execution"])
+
+        class Args:
+            spawner_ui_url = "https://spark-live-production.up.railway.app"
+            telegram_relay_secret = None
+            llm_provider = "codex"
+            chat_llm_provider = None
+            builder_llm_provider = None
+            memory_llm_provider = None
+            mission_llm_provider = None
+            codex_model = "gpt-5.5"
+
+        with patch.dict(
+            os.environ,
+            {
+                "SPARK_HOSTED_PRIVATE_PREVIEW": "1",
+                "SPARK_WORKSPACE_ID": "spark-railway-smoke-20260502",
+                "SPARK_UI_API_KEY": "ui-key",
+                "SPARK_BRIDGE_API_KEY": "bridge-key",
+                "SPARK_ALLOWED_HOSTS": "spark-live-production.up.railway.app",
+                "OPENAI_API_KEY": "parent-openai",
+            },
+            clear=False,
+        ), patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "/usr/local/bin/codex"}):
+            envs = build_module_envs(
+                Args(),
+                {
+                    gateway.name: gateway,
+                    builder.name: builder,
+                    spawner.name: spawner,
+                },
+                {
+                    "telegram.bot_token": "abc",
+                    "telegram.admin_ids": "123",
+                },
+            )
+
+        spawner_env = envs["spawner-ui"]
+        self.assertEqual(spawner_env["SPARK_HOSTED_PRIVATE_PREVIEW"], "1")
+        self.assertEqual(spawner_env["SPARK_WORKSPACE_ID"], "spark-railway-smoke-20260502")
+        self.assertEqual(spawner_env["SPARK_UI_API_KEY"], "ui-key")
+        self.assertEqual(spawner_env["SPARK_BRIDGE_API_KEY"], "bridge-key")
+        self.assertEqual(spawner_env["SPARK_ALLOWED_HOSTS"], "spark-live-production.up.railway.app")
+        self.assertNotIn("OPENAI_API_KEY", spawner_env)
+
     def test_pid_is_running_detects_current_process(self) -> None:
         self.assertTrue(pid_is_running(os.getpid()))
 

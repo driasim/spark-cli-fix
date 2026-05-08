@@ -3321,6 +3321,15 @@ def default_telegram_webhook_url(spawner_ui_url: str | None) -> str:
     return f"{scheme}://{host}:8788/spawner-events"
 
 
+HOSTED_SPAWNER_PARENT_ENV_KEYS = (
+    "SPARK_HOSTED_PRIVATE_PREVIEW",
+    "SPARK_WORKSPACE_ID",
+    "SPARK_UI_API_KEY",
+    "SPARK_BRIDGE_API_KEY",
+    "SPARK_ALLOWED_HOSTS",
+)
+
+
 def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Module], secret_values: dict[str, str]) -> dict[str, dict[str, str]]:
     gateway = modules_by_name["spark-telegram-bot"]
     spawner = modules_by_name["spawner-ui"]
@@ -3357,6 +3366,10 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
         "SPARK_WORKSPACE_ROOT": str(SPARK_HOME / "workspaces"),
         "SPAWNER_STATE_DIR": str(STATE_DIR / "spawner-ui"),
     }
+    for key in HOSTED_SPAWNER_PARENT_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            spawner_env[key] = value
     llm_metadata_env = spark_prefixed_metadata_env(llm_env)
     spawner_env.update(llm_metadata_env)
     mission_provider = llm_env.get("SPARK_MISSION_LLM_BOT_PROVIDER") or llm_env.get("BOT_DEFAULT_PROVIDER")
