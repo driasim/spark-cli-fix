@@ -3227,21 +3227,118 @@ def build_repo_board(system_map: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_voice_surface_view(system_map: dict[str, Any]) -> dict[str, Any]:
-    repo_names = {str(as_dict(repo).get("name")) for repo in as_list(system_map.get("discovered_repos"))}
+    repos = [as_dict(repo) for repo in as_list(system_map.get("discovered_repos"))]
+    repo_names = {str(repo.get("name")) for repo in repos}
+    repo_paths = {
+        str(repo.get("name")): Path(str(repo.get("path"))).expanduser()
+        for repo in repos
+        if isinstance(repo.get("path"), str) and str(repo.get("path")).strip()
+    }
     installed_modules = set(as_dict(system_map.get("installed_modules")).keys())
     available = "spark-voice-comms" in repo_names
     installed = "spark-voice-comms" in installed_modules
+
+    def source_file_contains(repo_name: str, relative: str, *needles: str) -> bool:
+        root = repo_paths.get(repo_name)
+        if root is None:
+            return False
+        path = root / relative
+        if not path.exists() or not path.is_file():
+            return False
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        return all(needle in text for needle in needles)
+
+    voice_hook_has_transcribe = source_file_contains(
+        "spark-voice-comms",
+        "src/voice_comms_chip/spark_hook.py",
+        "voice.transcribe",
+    )
+    voice_hook_has_speak = source_file_contains(
+        "spark-voice-comms",
+        "src/voice_comms_chip/spark_hook.py",
+        "voice.speak",
+    )
+    voice_hook_has_status = source_file_contains(
+        "spark-voice-comms",
+        "src/voice_comms_chip/spark_hook.py",
+        "voice.status",
+    )
+    builder_has_transcribe_bridge = source_file_contains(
+        "spark-intelligence-builder",
+        "src/spark_intelligence/adapters/telegram/runtime.py",
+        "voice.transcribe",
+    )
+    builder_has_speak_bridge = source_file_contains(
+        "spark-intelligence-builder",
+        "src/spark_intelligence/adapters/telegram/runtime.py",
+        "voice.speak",
+    )
+    builder_has_status_bridge = source_file_contains(
+        "spark-intelligence-builder",
+        "src/spark_intelligence/adapters/telegram/runtime.py",
+        "voice.status",
+    )
+    builder_has_transcript_preview = source_file_contains(
+        "spark-intelligence-builder",
+        "src/spark_intelligence/adapters/telegram/runtime.py",
+        "voice_transcript_preview",
+    ) or source_file_contains(
+        "spark-intelligence-builder",
+        "src/spark_intelligence/adapters/telegram/runtime.py",
+        "_build_voice_trace_fields",
+        "transcript",
+    )
+    telegram_has_voice_bridge = source_file_contains(
+        "spark-telegram-bot",
+        "src/telegramVoiceBridge.ts",
+        "voice",
+    ) or source_file_contains(
+        "spark-telegram-bot",
+        "src/index.ts",
+        "telegramVoiceBridge",
+    )
+
+    ingress_source_present = voice_hook_has_transcribe and builder_has_transcribe_bridge
+    egress_source_present = voice_hook_has_speak and builder_has_speak_bridge
+    if ingress_source_present and egress_source_present:
+        source_mode = "duplex"
+    elif ingress_source_present:
+        source_mode = "ingress"
+    elif egress_source_present:
+        source_mode = "egress"
+    else:
+        source_mode = "disabled"
+
     blockers = []
     if not available:
         blockers.append("spark-voice-comms repo not discovered")
     if available and not installed:
         blockers.append("spark-voice-comms is not installed in local Spark state")
+    if available and source_mode == "disabled":
+        blockers.append("voice ingress/egress source hooks are not detected")
+    blockers.append("voice provider/profile runtime status is not exported to Spark OS state")
+    blockers.append("voice final-answer join evidence is not compiled")
+    if builder_has_transcript_preview:
+        blockers.append("Builder retains raw voice transcript preview in private trace fields")
 
     return {
         "schema_version": VOICE_SURFACE_SCHEMA,
         "generated_at": utc_now(),
         "owner_system": "spark-voice-comms",
-        "mode": "disabled" if blockers else "egress",
+        "mode": "disabled" if blockers else source_mode,
+        "source_capability": {
+            "repo_discovered": available,
+            "installed_in_spark_state": installed,
+            "source_mode": source_mode,
+            "ingress_source_present": ingress_source_present,
+            "egress_source_present": egress_source_present,
+            "duplex_source_present": source_mode == "duplex",
+            "status_hook_present": voice_hook_has_status and builder_has_status_bridge,
+            "telegram_bridge_present": telegram_has_voice_bridge,
+        },
         "provider": {"configured": False, "kind": "unknown"},
         "profile": {"configured": False, "voice_style_ref": None},
         "authority": {"can_answer": not blockers, "can_trigger_actions": False, "requires_confirmation_for_actions": True},
@@ -3250,7 +3347,14 @@ def build_voice_surface_view(system_map: dict[str, Any]) -> dict[str, Any]:
             "raw_audio_exported_to_os_artifacts": False,
             "transcript_bodies_exported_to_os_artifacts": False,
         },
-        "trace": {"voice_events_supported": False, "final_answer_check_supported": False},
+        "trace": {
+            "voice_events_supported": False,
+            "final_answer_check_supported": False,
+            "source_hooks_present": source_mode != "disabled",
+            "telegram_delivery_bridge_present": telegram_has_voice_bridge,
+            "trace_evidence": "source_present_not_proven" if source_mode != "disabled" else "missing_source_hooks",
+        },
+        "privacy_findings": {"builder_transcript_preview_present": builder_has_transcript_preview},
         "blockers": blockers,
         "redaction": "metadata only; raw audio, transcript bodies, provider secrets, and voice profile secrets omitted",
     }

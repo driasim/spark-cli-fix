@@ -91,6 +91,21 @@ class SparkSystemMapTests(unittest.TestCase):
             repo = root / "spark-cli"
             repo.mkdir()
             (repo / ".git").mkdir()
+            voice = root / "spark-voice-comms"
+            builder = root / "spark-intelligence-builder"
+            telegram = root / "spark-telegram-bot"
+            (voice / "src" / "voice_comms_chip").mkdir(parents=True)
+            (builder / "src" / "spark_intelligence" / "adapters" / "telegram").mkdir(parents=True)
+            (telegram / "src").mkdir(parents=True)
+            (voice / "src" / "voice_comms_chip" / "spark_hook.py").write_text(
+                "voice.status\nvoice.transcribe\nvoice.speak\n",
+                encoding="utf-8",
+            )
+            (builder / "src" / "spark_intelligence" / "adapters" / "telegram" / "runtime.py").write_text(
+                "voice.status\nvoice.transcribe\nvoice.speak\nvoice_transcript_preview\n",
+                encoding="utf-8",
+            )
+            (telegram / "src" / "telegramVoiceBridge.ts").write_text("voice bridge", encoding="utf-8")
             board = build_repo_board(
                 {
                     "registry": {"modules": {"spark-cli": {}}},
@@ -105,12 +120,26 @@ class SparkSystemMapTests(unittest.TestCase):
                     ],
                 }
             )
-        view = build_voice_surface_view({"installed_modules": {}, "discovered_repos": [{"name": "spark-voice-comms"}]})
+            view = build_voice_surface_view(
+                {
+                    "installed_modules": {},
+                    "discovered_repos": [
+                        {"name": "spark-voice-comms", "path": str(voice)},
+                        {"name": "spark-intelligence-builder", "path": str(builder)},
+                        {"name": "spark-telegram-bot", "path": str(telegram)},
+                    ],
+                }
+            )
         encoded = json.dumps({"board": board, "voice": view})
 
         self.assertEqual(board["schema_version"], "spark.repo_board.compiled.v0")
         self.assertEqual(board["repos"][0]["risk_class"], "critical")
         self.assertEqual(view["schema_version"], "spark.voice_surface_view.compiled.v0")
+        self.assertEqual(view["mode"], "disabled")
+        self.assertEqual(view["source_capability"]["source_mode"], "duplex")
+        self.assertTrue(view["source_capability"]["telegram_bridge_present"])
+        self.assertEqual(view["trace"]["trace_evidence"], "source_present_not_proven")
+        self.assertTrue(view["privacy_findings"]["builder_transcript_preview_present"])
         self.assertFalse(view["memory_policy"]["raw_audio_exported_to_os_artifacts"])
         self.assertIn("not installed", " ".join(view["blockers"]))
         self.assertNotIn("README.md", encoded)
