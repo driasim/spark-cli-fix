@@ -246,14 +246,14 @@ class SparkSystemMapTests(unittest.TestCase):
         builder_item = next(
             item for item in repo_board["duplicate_truths"]["items"] if item["id"] == "builder-release-vs-nonrelease-installed-source"
         )
-        self.assertEqual(builder_item["canonical_path"], str(builder_owner))
-        self.assertIn("runtime artifact", builder_item["evidence"])
-        self.assertEqual(builder_item["evidence_details"]["owner_source"]["aoc_command_marker_count"], 6)
-        self.assertEqual(builder_item["evidence_details"]["installed_runtime_artifact"]["aoc_command_marker_count"], 6)
-        self.assertTrue(builder_item["evidence_details"]["installed_runtime_artifact"]["trace_ref_argument_present"])
+        self.assertEqual(builder_item["canonical_path"], str(builder_release))
+        self.assertIn("Promoted release source", builder_item["evidence"])
+        self.assertEqual(builder_item["evidence_details"]["desktop_backlog_source"]["aoc_command_marker_count"], 6)
+        self.assertEqual(builder_item["evidence_details"]["promoted_release_source"]["aoc_command_marker_count"], 6)
+        self.assertTrue(builder_item["evidence_details"]["promoted_release_source"]["trace_ref_argument_present"])
         self.assertEqual(
             builder_item["evidence_details"]["source_truth_policy"],
-            "Owner repo is canonical; installed runtime artifacts must be rebuildable from owner source.",
+            "Release Builder source is canonical for the current Spark OS line; Desktop Builder is backlog until curated or replaced.",
         )
         self.assertEqual(
             builder_item["evidence_details"]["local_source_probe"],

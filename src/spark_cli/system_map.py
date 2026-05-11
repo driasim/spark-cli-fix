@@ -3438,33 +3438,33 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
         items.append(
             duplicate_truth_item(
                 item_id="builder-release-vs-nonrelease-installed-source",
-                fact="Builder source truth and installed runtime artifact",
+                fact="Promoted Builder release source and legacy Builder sources",
                 classification="active_legacy",
                 severity="critical",
-                owner_repo="spark-intelligence-builder",
-                canonical_path=str(builder_owner_source),
+                owner_repo="spark-intelligence-builder-release",
+                canonical_path=str(Path(builder_runtime_artifact)),
                 duplicate_path=str(builder_nonrelease),
                 evidence=(
-                    "Installed module metadata points at a Builder runtime artifact while another installed-looking Builder source exists. "
-                    "The Desktop owner repo remains the canonical source of truth. "
-                    f"Current runtime artifact exposes {command_count}/{len(BUILDER_AOC_COMMAND_MARKERS)} AOC command markers"
+                    "Installed module metadata points at the promoted Builder release source while another installed-looking "
+                    "Builder source and the dirty Desktop Builder owner checkout still exist. "
+                    f"Promoted release source exposes {command_count}/{len(BUILDER_AOC_COMMAND_MARKERS)} AOC command markers"
                     f"{' with trace-ref support' if trace_ref_present else ' without detected trace-ref support'}."
                 ),
-                risk="Operators can patch an installed artifact or legacy duplicate and believe they changed the Builder source truth.",
+                risk="Operators can patch the dirty Desktop owner checkout or non-release duplicate and believe they changed the active Builder truth.",
                 next_safe_action=(
-                    "Treat the Desktop Builder repo as canonical source, keep the release install as a temporary runtime artifact, "
-                    "port only proven runtime behavior into the owner repo, then rebuild the installed artifact from that source."
+                    "Treat the release Builder source as canonical for the current Spark OS line. Curate or replace the dirty "
+                    "Desktop owner checkout separately, and do not merge its backlog wholesale into the promoted source."
                 ),
                 verification_command="spark verify --onboarding --json",
-                rollback="Keep installed artifacts read-only for runtime stability until the owner repo is clean and proof remains green.",
+                rollback="Repoint installed module metadata only after another Builder source passes the same AOC, trace, and live proof gates.",
                 evidence_details={
-                    "owner_source": desktop_audit,
-                    "installed_runtime_artifact": runtime_audit,
+                    "promoted_release_source": runtime_audit,
+                    "desktop_backlog_source": desktop_audit,
                     "duplicate_nonrelease": duplicate_audit,
                     "duplicate_dirty_file_count": duplicate_dirty,
                     "onboarding_gate": "builder_runtime_source",
                     "local_source_probe": "Insert repo src on sys.path before importing spark_intelligence.cli build_parser.",
-                    "source_truth_policy": "Owner repo is canonical; installed runtime artifacts must be rebuildable from owner source.",
+                    "source_truth_policy": "Release Builder source is canonical for the current Spark OS line; Desktop Builder is backlog until curated or replaced.",
                 },
             )
         )
