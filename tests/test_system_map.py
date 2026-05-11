@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -33,6 +34,17 @@ from spark_cli.system_map import (
     summarize_pids,
     summarize_setup,
 )
+
+
+def init_git_repo(path: Path) -> str:
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "spark-test@example.test"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Spark Test"], cwd=path, check=True)
+    (path / "README.md").write_text("test repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True, text=True)
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=path, check=True, capture_output=True, text=True)
+    return result.stdout.strip()
 
 
 class SparkSystemMapTests(unittest.TestCase):
@@ -182,13 +194,25 @@ class SparkSystemMapTests(unittest.TestCase):
             builder_release = spark_home / "modules" / "spark-intelligence-builder-release" / "source"
             builder_legacy = spark_home / "modules" / "spark-intelligence-builder" / "source"
             builder_owner = desktop / "spark-intelligence-builder"
+            telegram_source = spark_home / "modules" / "spark-telegram-bot" / "source"
             spawner_source = spark_home / "modules" / "spawner-ui" / "source"
             spawner_audit_route = spawner_source / "src" / "routes" / "api" / "system" / "state-root"
             systems_repo = desktop / "spark-intelligence-systems"
             registry = root / "registry.json"
 
-            for path in [desktop, state, builder_release, builder_legacy, builder_owner, spawner_source / ".spawner", spawner_audit_route, systems_repo]:
+            for path in [
+                desktop,
+                state,
+                builder_release,
+                builder_legacy,
+                builder_owner,
+                telegram_source,
+                spawner_source / ".spawner",
+                spawner_audit_route,
+                systems_repo,
+            ]:
                 path.mkdir(parents=True)
+            init_git_repo(telegram_source)
             builder_cli_markers = '\n'.join(
                 [
                     '"panel"',
@@ -209,9 +233,10 @@ class SparkSystemMapTests(unittest.TestCase):
                 json.dumps(
                     {
                         "modules": {
-                            "spark-intelligence-builder": {"source": "https://example.test/builder"},
-                            "spawner-ui": {"source": "https://example.test/spawner"},
-                        },
+                        "spark-intelligence-builder": {"source": "https://example.test/builder"},
+                        "spark-telegram-bot": {"source": "https://example.test/telegram"},
+                        "spawner-ui": {"source": "https://example.test/spawner"},
+                    },
                         "bundles": {},
                     }
                 ),
@@ -221,6 +246,12 @@ class SparkSystemMapTests(unittest.TestCase):
                 json.dumps(
                     {
                         "spark-intelligence-builder": {"path": str(builder_release), "source": str(builder_release)},
+                        "spark-telegram-bot": {
+                            "path": str(telegram_source),
+                            "source": str(telegram_source),
+                            "registry_commit": "0" * 40,
+                            "registry_source": "https://example.test/telegram",
+                        },
                         "spawner-ui": {"path": str(spawner_source), "source": str(spawner_source)},
                     }
                 ),
@@ -242,6 +273,7 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertIn("builder-release-vs-nonrelease-installed-source", item_ids)
         self.assertIn("spawner-module-local-state-root", item_ids)
         self.assertIn("spark-intelligence-systems-prototype-compiler", item_ids)
+        self.assertIn("spark-telegram-bot-runtime-registry-pin-drift", item_ids)
         self.assertIn("builder-release-vs-nonrelease-installed-source", cockpit_item_ids)
         builder_item = next(
             item for item in repo_board["duplicate_truths"]["items"] if item["id"] == "builder-release-vs-nonrelease-installed-source"
@@ -262,6 +294,11 @@ class SparkSystemMapTests(unittest.TestCase):
         spawner_item = next(item for item in repo_board["duplicate_truths"]["items"] if item["id"] == "spawner-module-local-state-root")
         self.assertIn("State-root audit route exists", spawner_item["evidence"])
         self.assertIn("/api/system/state-root", spawner_item["verification_command"])
+        telegram_pin_item = next(
+            item for item in repo_board["duplicate_truths"]["items"] if item["id"] == "spark-telegram-bot-runtime-registry-pin-drift"
+        )
+        self.assertEqual(telegram_pin_item["classification"], "runtime_ahead_of_registry_pin")
+        self.assertIn("release metadata drift", telegram_pin_item["evidence"])
         self.assertEqual(repo_board["summary"]["duplicate_truth_count"], len(item_ids))
         self.assertFalse(compiled["operating_cockpit"]["action_boundary"].startswith("Write"))
 

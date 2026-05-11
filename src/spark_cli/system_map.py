@@ -445,6 +445,7 @@ def git_board_status(path: Path) -> dict[str, Any]:
             "dirty_tracked_count": 0,
             "untracked_count": 0,
             "last_commit": None,
+            "head_commit": None,
         }
 
     code, status = run_git(path, ["status", "--short", "--branch"])
@@ -459,6 +460,7 @@ def git_board_status(path: Path) -> dict[str, Any]:
             dirty_tracked_count += 1
 
     code, commit = run_git(path, ["log", "-1", "--format=%h %cI"])
+    head_code, head_commit = run_git(path, ["rev-parse", "HEAD"])
     return {
         "available": True,
         "branch": branch_status["branch"] or None,
@@ -468,6 +470,7 @@ def git_board_status(path: Path) -> dict[str, Any]:
         "dirty_tracked_count": dirty_tracked_count,
         "untracked_count": untracked_count,
         "last_commit": commit if code == 0 and commit else None,
+        "head_commit": head_commit if head_code == 0 and head_commit else None,
     }
 
 
@@ -557,6 +560,8 @@ def summarize_installed(installed: dict[str, Any] | None) -> dict[str, Any]:
             "installed_at": item.get("installed_at"),
             "updated_at": item.get("updated_at"),
             "bundle_provenance": item.get("bundle_provenance"),
+            "registry_source": item.get("registry_source"),
+            "registry_commit": item.get("registry_commit"),
             "last_install_status": as_dict(item.get("last_install")).get("status"),
             "last_update_status": as_dict(item.get("last_update")).get("status"),
         }
@@ -3422,6 +3427,7 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
     spark_home = Path(str(source_roots.get("spark_home") or "")).expanduser()
     desktop = Path(str(source_roots.get("desktop") or "")).expanduser()
     installed_modules = as_dict(system_map.get("installed_modules"))
+    registry_modules = as_dict(as_dict(system_map.get("registry")).get("modules"))
     items: list[dict[str, Any]] = []
 
     builder_installed = as_dict(installed_modules.get("spark-intelligence-builder"))
@@ -3539,6 +3545,7 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
         if installed_path_raw:
             installed_path = Path(installed_path_raw)
             installed_repo = collect_repo_metadata(installed_path)
+            installed_git = git_board_status(installed_path)
             dirty, untracked = git_dirty_from_repo(installed_repo)
             if dirty or untracked:
                 items.append(
@@ -3557,6 +3564,41 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
                         rollback="Keep runtime running from installed source until curated release proof passes.",
                     )
                 )
+            else:
+                registry_entry = as_dict(registry_modules.get(module_id))
+                registry_commit = str(installed.get("registry_commit") or registry_entry.get("commit") or "").strip().lower()
+                registry_source = str(installed.get("registry_source") or registry_entry.get("source") or "").strip()
+                head_commit = str(installed_git.get("head_commit") or "").strip().lower()
+                if registry_commit and head_commit and registry_commit != head_commit:
+                    items.append(
+                        duplicate_truth_item(
+                            item_id=f"{module_id}-runtime-registry-pin-drift",
+                            fact=f"{fact} release pin",
+                            classification="runtime_ahead_of_registry_pin",
+                            severity="critical" if module_id == "spark-telegram-bot" else "warning",
+                            owner_repo=module_id,
+                            canonical_path=str(installed_path),
+                            duplicate_path=registry_source,
+                            evidence=(
+                                "Running installed source is clean but its git HEAD differs from the registry commit. "
+                                "This is release metadata drift, not dirty local file drift."
+                            ),
+                            risk="Spark start/restart/update can warn or move operators back to older public installer truth.",
+                            next_safe_action=(
+                                "Port and push the owner repo commit, update registry/release metadata, or explicitly keep this "
+                                "installed source classified as a local runtime test artifact."
+                            ),
+                            verification_command="spark status --json; git status --short --branch; git rev-parse HEAD",
+                            rollback="Keep the current public registry pin until the newer runtime commit has source-owner release proof.",
+                            evidence_details={
+                                "installed_head": head_commit[:12],
+                                "registry_commit": registry_commit[:12],
+                                "branch": installed_git.get("branch"),
+                                "runtime_dirty_tracked_count": dirty,
+                                "runtime_untracked_count": untracked,
+                            },
+                        )
+                    )
 
     browser_extension = repo_by_name(system_map, "spark-browser-extension")
     if browser_extension:
