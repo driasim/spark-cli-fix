@@ -19,6 +19,9 @@ CAPABILITY_CATALOG_SCHEMA = "spark.capability_catalog.compiled.v0"
 CAPABILITY_CARD_SCHEMA = "spark.capability_card.v1"
 TRACE_INDEX_SCHEMA = "spark.trace_index.compiled.v0"
 MEMORY_MOVEMENT_INDEX_SCHEMA = "spark.memory_movement_index.compiled.v0"
+REPO_BOARD_SCHEMA = "spark.repo_board.compiled.v0"
+VOICE_SURFACE_SCHEMA = "spark.voice_surface_view.compiled.v0"
+OPERATING_COCKPIT_SCHEMA = "spark.operating_cockpit.compiled.v0"
 
 SPARK_REPO_NAME_HINTS = ("spark", "domain-chip", "spawner-ui")
 
@@ -65,6 +68,35 @@ SAFE_JSONL_COUNT_KEYS = (
     "route",
     "surface",
 )
+
+SENSITIVE_KEY_NAME_HINTS = (
+    "api_key",
+    "authorization",
+    "bot_token",
+    "chat_id",
+    "cookie",
+    "secret",
+    "token",
+    "transcript",
+    "user_id",
+)
+
+OWNER_SURFACES = {
+    "spark-cli": "installer, compiler, authority, browser-use, release metadata",
+    "spark-intelligence-builder": "AOC, black box, memory orchestration, operating-panel read model",
+    "spark-telegram-bot": "Telegram field console",
+    "spawner-ui": "mission execution and mission trace",
+    "spark-command-center": "Spark Operating Cockpit shell",
+    "spark-memory-quality-dashboard": "Cockpit memory review source module",
+    "domain-chip-memory": "durable memory substrate and movement discipline",
+    "spark-voice-comms": "voice ingress/egress surface",
+    "spark-domain-chip-labs": "capability lab, benchmark packets, review gates",
+    "spark-swarm": "specialization paths and publication governance",
+    "spark-skill-graphs": "specialist library and routing substrate",
+    "spark-intelligence-systems": "doctrine, runbook, prototype read model",
+}
+
+CORE_REPOS = set(OWNER_SURFACES)
 
 SAFE_TELEGRAM_FINAL_ANSWER_FIELDS = (
     "ts",
@@ -309,6 +341,79 @@ def git_summary(path: Path) -> dict[str, Any]:
     return {"available": True, "head_short": result.stdout.strip() if result.returncode == 0 else None}
 
 
+def run_git(path: Path, args: list[str], timeout: int = 3) -> tuple[int, str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception:
+        return 1, ""
+    return result.returncode, result.stdout.strip()
+
+
+def parse_branch_status(line: str) -> dict[str, Any]:
+    branch = ""
+    upstream = None
+    ahead = 0
+    behind = 0
+    if line.startswith("## "):
+        body = line[3:]
+        no_commit_prefix = "No commits yet on "
+        if body.startswith(no_commit_prefix):
+            branch = body[len(no_commit_prefix) :].split(" ", 1)[0]
+        elif "..." in body:
+            branch, rest = body.split("...", 1)
+            upstream = rest.split(" ", 1)[0] if rest else None
+        else:
+            branch = body.split(" ", 1)[0]
+        ahead_match = re.search(r"ahead\s+(\d+)", body)
+        behind_match = re.search(r"behind\s+(\d+)", body)
+        ahead = int(ahead_match.group(1)) if ahead_match else 0
+        behind = int(behind_match.group(1)) if behind_match else 0
+    return {"branch": branch, "upstream": upstream, "ahead": ahead, "behind": behind}
+
+
+def git_board_status(path: Path) -> dict[str, Any]:
+    if not (path / ".git").exists():
+        return {
+            "available": False,
+            "branch": None,
+            "upstream": None,
+            "ahead": 0,
+            "behind": 0,
+            "dirty_tracked_count": 0,
+            "untracked_count": 0,
+            "last_commit": None,
+        }
+
+    code, status = run_git(path, ["status", "--short", "--branch"])
+    lines = status.splitlines() if code == 0 and status else []
+    branch_status = parse_branch_status(lines[0] if lines else "")
+    dirty_tracked_count = 0
+    untracked_count = 0
+    for line in lines[1:]:
+        if line.startswith("??"):
+            untracked_count += 1
+        elif line.strip():
+            dirty_tracked_count += 1
+
+    code, commit = run_git(path, ["log", "-1", "--format=%h %cI"])
+    return {
+        "available": True,
+        "branch": branch_status["branch"] or None,
+        "upstream": branch_status["upstream"],
+        "ahead": branch_status["ahead"],
+        "behind": branch_status["behind"],
+        "dirty_tracked_count": dirty_tracked_count,
+        "untracked_count": untracked_count,
+        "last_commit": commit if code == 0 and commit else None,
+    }
+
+
 def collect_repo_metadata(path: Path) -> dict[str, Any]:
     record: dict[str, Any] = {"name": path.name, "path": str(path), "exists": path.exists()}
     if not path.exists():
@@ -498,7 +603,7 @@ def count_safe_jsonl(path: Path) -> dict[str, Any]:
     if not path.exists():
         return out
 
-    line_count = parsed_count = parse_errors = 0
+    line_count = parsed_count = parse_errors = redacted_key_name_count = 0
     key_counts: Counter[str] = Counter()
     value_counts: dict[str, Counter[str]] = {key: Counter() for key in SAFE_JSONL_COUNT_KEYS}
     try:
@@ -516,7 +621,11 @@ def count_safe_jsonl(path: Path) -> dict[str, Any]:
                 if not isinstance(payload, dict):
                     continue
                 for key, value in payload.items():
-                    key_counts[str(key)] += 1
+                    key_name = str(key)
+                    if any(hint in key_name.lower() for hint in SENSITIVE_KEY_NAME_HINTS):
+                        redacted_key_name_count += 1
+                        continue
+                    key_counts[key_name] += 1
                     if key in value_counts and isinstance(value, (str, int, float, bool)) and value is not None:
                         value_counts[key][str(value)[:80]] += 1
     except Exception as exc:
@@ -526,6 +635,7 @@ def count_safe_jsonl(path: Path) -> dict[str, Any]:
     out["line_count"] = line_count
     out["parsed_count"] = parsed_count
     out["parse_errors"] = parse_errors
+    out["redacted_key_name_count"] = redacted_key_name_count
     out["top_keys"] = dict(key_counts.most_common(30))
     out["safe_value_counts"] = {key: dict(counter.most_common(30)) for key, counter in value_counts.items() if counter}
     return out
@@ -550,7 +660,7 @@ def inspect_safe_jsonl_samples(
         return out
 
     identifier_fields = identifier_fields or {}
-    line_count = parsed_count = parse_errors = 0
+    line_count = parsed_count = parse_errors = redacted_key_name_count = 0
     key_counts: Counter[str] = Counter()
     samples: deque[dict[str, Any]] = deque(maxlen=max(0, min(int(limit), 100)))
     try:
@@ -568,7 +678,11 @@ def inspect_safe_jsonl_samples(
                 if not isinstance(payload, dict):
                     continue
                 for key in payload:
-                    key_counts[str(key)] += 1
+                    key_name = str(key)
+                    if any(hint in key_name.lower() for hint in SENSITIVE_KEY_NAME_HINTS):
+                        redacted_key_name_count += 1
+                        continue
+                    key_counts[key_name] += 1
                 sample: dict[str, Any] = {}
                 for field in safe_fields:
                     if field in payload:
@@ -586,6 +700,7 @@ def inspect_safe_jsonl_samples(
     out["line_count"] = line_count
     out["parsed_count"] = parsed_count
     out["parse_errors"] = parse_errors
+    out["redacted_key_name_count"] = redacted_key_name_count
     out["top_keys"] = dict(key_counts.most_common(30))
     out["samples"] = list(samples)
     out["sample_count"] = len(samples)
@@ -2407,6 +2522,211 @@ def build_gaps(system_map: dict[str, Any]) -> list[dict[str, str]]:
     return list(deduped.values())
 
 
+def repo_owner_surface(name: str) -> str:
+    if name in OWNER_SURFACES:
+        return OWNER_SURFACES[name]
+    if name.startswith("domain-chip-"):
+        return "domain chip candidate"
+    if name.startswith("specialization-path-"):
+        return "specialization path candidate"
+    if "telegram" in name:
+        return "Telegram-adjacent surface"
+    if "swarm" in name:
+        return "Swarm-adjacent surface"
+    if "spark" in name:
+        return "Spark-adjacent repo"
+    return "unclassified"
+
+
+def repo_manifest_presence(repo: dict[str, Any]) -> dict[str, bool]:
+    contract_files = set(as_list(repo.get("contract_files")))
+    return {
+        "spark_toml": bool(as_dict(repo.get("spark_toml"))),
+        "spark_chip": bool(as_dict(repo.get("spark_chip"))),
+        "skill_manifest": bool(as_dict(repo.get("skill_manifest"))),
+        "agents_md": "AGENTS.md" in contract_files,
+        "contract_file_count": bool(contract_files),
+    }
+
+
+def repo_release_status(name: str, git: dict[str, Any], manifest: dict[str, bool], registry_present: bool) -> tuple[str, str | None, str]:
+    dirty = int(git.get("dirty_tracked_count") or 0)
+    untracked = int(git.get("untracked_count") or 0)
+    behind = int(git.get("behind") or 0)
+    if not git.get("available"):
+        return "not_release_candidate", "not a git repo", "inspect or ignore before product work"
+    if dirty or untracked:
+        return "blocked", "dirty worktree", "curate local changes before merge or release"
+    if behind:
+        return "blocked", "behind upstream", "pull or merge upstream before release"
+    if name in CORE_REPOS and not any(manifest.values()):
+        return "blocked", "core repo missing Spark manifest", "add or confirm owner manifest before release"
+    if registry_present:
+        return "eligible", None, "safe to consider for the next verified workstream"
+    return "inspect", "not in installer registry", "decide whether this repo should remain local, become a capability, or be ignored"
+
+
+def repo_risk_class(name: str, release_eligibility: str) -> str:
+    if name in {"spark-cli", "spark-intelligence-builder", "spark-telegram-bot", "spawner-ui"}:
+        return "critical"
+    if release_eligibility == "blocked":
+        return "high"
+    if name in CORE_REPOS:
+        return "medium"
+    return "low"
+
+
+def build_repo_board(system_map: dict[str, Any]) -> dict[str, Any]:
+    registry_modules = set(as_dict(system_map.get("registry", {}).get("modules")).keys())
+    installed_modules = set(as_dict(system_map.get("installed_modules")).keys())
+    rows: list[dict[str, Any]] = []
+
+    for repo in as_list(system_map.get("discovered_repos")):
+        repo = as_dict(repo)
+        name = str(repo.get("name") or "")
+        ids = repo_ids(repo)
+        registry_present = bool(ids & registry_modules)
+        installed_present = bool(ids & installed_modules)
+        git = git_board_status(Path(str(repo.get("path") or "")))
+        manifest = repo_manifest_presence(repo)
+        release_eligibility, do_not_merge_reason, next_safe_action = repo_release_status(name, git, manifest, registry_present)
+        rows.append(
+            {
+                "repo": name,
+                "path": repo.get("path"),
+                "branch": git.get("branch"),
+                "upstream": git.get("upstream"),
+                "ahead": git.get("ahead"),
+                "behind": git.get("behind"),
+                "dirty_tracked_count": git.get("dirty_tracked_count"),
+                "untracked_count": git.get("untracked_count"),
+                "last_commit": git.get("last_commit"),
+                "git_available": git.get("available"),
+                "manifest_presence": manifest,
+                "registry_present": registry_present,
+                "installed_present": installed_present,
+                "module_ids": sorted(ids),
+                "owner_surface": repo_owner_surface(name),
+                "release_eligibility": release_eligibility,
+                "risk_class": repo_risk_class(name, release_eligibility),
+                "next_safe_action": next_safe_action,
+                "do_not_merge_reason": do_not_merge_reason,
+            }
+        )
+
+    summary = {
+        "repo_count": len(rows),
+        "git_repo_count": sum(1 for row in rows if row["git_available"]),
+        "dirty_repo_count": sum(1 for row in rows if int(row.get("dirty_tracked_count") or 0) or int(row.get("untracked_count") or 0)),
+        "blocked_release_count": sum(1 for row in rows if row["release_eligibility"] == "blocked"),
+        "critical_repo_count": sum(1 for row in rows if row["risk_class"] == "critical"),
+    }
+    ranked = sorted(
+        rows,
+        key=lambda row: (
+            {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(str(row["risk_class"]), 4),
+            {"blocked": 0, "inspect": 1, "eligible": 2, "not_release_candidate": 3}.get(str(row["release_eligibility"]), 4),
+            str(row["repo"]).lower(),
+        ),
+    )
+    return {
+        "schema_version": REPO_BOARD_SCHEMA,
+        "generated_at": utc_now(),
+        "redaction": "repo status metadata only; filenames, diffs, env files, logs, and untracked file names omitted",
+        "summary": summary,
+        "next_actions": [
+            {
+                "repo": row["repo"],
+                "risk_class": row["risk_class"],
+                "release_eligibility": row["release_eligibility"],
+                "next_safe_action": row["next_safe_action"],
+                "do_not_merge_reason": row["do_not_merge_reason"],
+            }
+            for row in ranked[:20]
+        ],
+        "repos": rows,
+    }
+
+
+def build_voice_surface_view(system_map: dict[str, Any]) -> dict[str, Any]:
+    repo_names = {str(as_dict(repo).get("name")) for repo in as_list(system_map.get("discovered_repos"))}
+    installed_modules = set(as_dict(system_map.get("installed_modules")).keys())
+    available = "spark-voice-comms" in repo_names
+    installed = "spark-voice-comms" in installed_modules
+    blockers = []
+    if not available:
+        blockers.append("spark-voice-comms repo not discovered")
+    if available and not installed:
+        blockers.append("spark-voice-comms is not installed in local Spark state")
+
+    return {
+        "schema_version": VOICE_SURFACE_SCHEMA,
+        "generated_at": utc_now(),
+        "owner_system": "spark-voice-comms",
+        "mode": "disabled" if blockers else "egress",
+        "provider": {"configured": False, "kind": "unknown"},
+        "profile": {"configured": False, "voice_style_ref": None},
+        "authority": {"can_answer": not blockers, "can_trigger_actions": False, "requires_confirmation_for_actions": True},
+        "memory_policy": {
+            "transcripts_are_durable_by_default": False,
+            "raw_audio_exported_to_os_artifacts": False,
+            "transcript_bodies_exported_to_os_artifacts": False,
+        },
+        "trace": {"voice_events_supported": False, "final_answer_check_supported": False},
+        "blockers": blockers,
+        "redaction": "metadata only; raw audio, transcript bodies, provider secrets, and voice profile secrets omitted",
+    }
+
+
+def build_operating_cockpit(compiled: dict[str, Any]) -> dict[str, Any]:
+    system_map = as_dict(compiled.get("system_map"))
+    repo_board = as_dict(compiled.get("repo_board"))
+    trace_index = as_dict(compiled.get("trace_index"))
+    capability_catalog = as_dict(compiled.get("capability_catalog"))
+    voice_surface = as_dict(compiled.get("voice_surface_view"))
+    return {
+        "schema_version": OPERATING_COCKPIT_SCHEMA,
+        "generated_at": utc_now(),
+        "product_decision": "Spark Operating Cockpit is the single daily command center. Source repos keep runtime truth; the Cockpit owns the unified operator experience.",
+        "privacy": {
+            "raw_secret_values_allowed": False,
+            "raw_chat_ids_allowed": False,
+            "raw_user_wording_allowed": False,
+            "raw_memory_bodies_allowed": False,
+            "raw_audio_allowed": False,
+            "raw_transcript_bodies_allowed": False,
+        },
+        "input_artifacts": {
+            "system_map": {
+                "schema_version": system_map.get("schema_version"),
+                "module_count": len(as_list(system_map.get("modules"))),
+                "repo_count": len(as_list(system_map.get("discovered_repos"))),
+            },
+            "repo_board": {
+                "schema_version": repo_board.get("schema_version"),
+                "repo_count": as_dict(repo_board.get("summary")).get("repo_count"),
+                "dirty_repo_count": as_dict(repo_board.get("summary")).get("dirty_repo_count"),
+            },
+            "trace_index": {
+                "schema_version": trace_index.get("schema_version"),
+                "builder_event_count": as_dict(trace_index.get("builder_events")).get("row_count"),
+            },
+            "capability_catalog": {
+                "schema_version": capability_catalog.get("schema_version"),
+                "capability_card_count": len(as_list(capability_catalog.get("capability_cards"))),
+                "chip_manifest_count": len(as_list(capability_catalog.get("chip_manifests"))),
+            },
+            "voice_surface": {
+                "schema_version": voice_surface.get("schema_version"),
+                "mode": voice_surface.get("mode"),
+                "blocker_count": len(as_list(voice_surface.get("blockers"))),
+            },
+        },
+        "action_boundary": "Read-only until high-agency actions carry AuthorityVerdictV1 trace evidence.",
+        "top_blockers": as_list(system_map.get("gaps"))[:10],
+    }
+
+
 def compile_system_map(desktop: Path, spark_home: Path, registry_path: Path) -> dict[str, Any]:
     state_dir = spark_home / "state"
     registry, registry_error = read_json(registry_path)
@@ -2448,13 +2768,17 @@ def compile_system_map(desktop: Path, spark_home: Path, registry_path: Path) -> 
     system_map["modules"] = build_modules(registry_summary, installed_summary, repos, running)
     system_map["gaps"] = build_gaps(system_map)
 
-    return {
+    compiled = {
         "system_map": system_map,
         "authority_view": build_authority_view(desktop, setup_summary),
         "capability_catalog": build_capability_catalog(repos),
         "trace_index": build_trace_index(spark_home, builder_home),
         "memory_movement_index": build_memory_movement_index(builder_home),
     }
+    compiled["repo_board"] = build_repo_board(system_map)
+    compiled["voice_surface_view"] = build_voice_surface_view(system_map)
+    compiled["operating_cockpit"] = build_operating_cockpit(compiled)
+    return compiled
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -2510,6 +2834,9 @@ def write_compiled_outputs(out_dir: Path, compiled: dict[str, Any]) -> dict[str,
         "capability_catalog": out_dir / "capability-catalog.json",
         "trace_index": out_dir / "trace-index.json",
         "memory_movement_index": out_dir / "memory-movement-index.json",
+        "repo_board": out_dir / "repo-board.json",
+        "voice_surface_view": out_dir / "voice-surface-view.json",
+        "operating_cockpit": out_dir / "operating-cockpit.json",
         "gaps": out_dir / "gaps.md",
     }
     write_json(paths["system_map"], system_map)
@@ -2517,6 +2844,9 @@ def write_compiled_outputs(out_dir: Path, compiled: dict[str, Any]) -> dict[str,
     write_json(paths["capability_catalog"], compiled["capability_catalog"])
     write_json(paths["trace_index"], compiled["trace_index"])
     write_json(paths["memory_movement_index"], compiled["memory_movement_index"])
+    write_json(paths["repo_board"], compiled["repo_board"])
+    write_json(paths["voice_surface_view"], compiled["voice_surface_view"])
+    write_json(paths["operating_cockpit"], compiled["operating_cockpit"])
     write_gaps_markdown(paths["gaps"], as_list(system_map.get("gaps")), system_map)
     return {key: str(path) for key, path in paths.items()}
 
@@ -2526,6 +2856,8 @@ def compile_summary(compiled: dict[str, Any], written: dict[str, str] | None = N
     capability_catalog = as_dict(compiled["capability_catalog"])
     trace_index = as_dict(compiled["trace_index"])
     memory_index = as_dict(compiled["memory_movement_index"])
+    repo_board = as_dict(compiled.get("repo_board"))
+    voice_surface = as_dict(compiled.get("voice_surface_view"))
     builder_events = as_dict(trace_index.get("builder_events"))
     builder_event_samples = as_dict(trace_index.get("builder_event_samples"))
     builder_trace_groups = as_dict(trace_index.get("builder_trace_groups"))
@@ -2554,6 +2886,9 @@ def compile_summary(compiled: dict[str, Any], written: dict[str, str] | None = N
         "memory_movement_status": memory_status.get("status"),
         "memory_movement_rows": memory_status.get("row_count"),
         "builder_memory_table_count": builder_memory_tables.get("table_count"),
+        "repo_board": as_dict(repo_board.get("summary")),
+        "voice_surface_mode": voice_surface.get("mode"),
+        "voice_surface_blockers": len(as_list(voice_surface.get("blockers"))),
         "privacy": system_map.get("privacy"),
         "outputs": written or {},
     }

@@ -14,6 +14,8 @@ from spark_cli.system_map import (
     build_authority_view,
     build_capability_catalog,
     build_memory_movement_index,
+    build_repo_board,
+    build_voice_surface_view,
     collect_repo_metadata,
     count_safe_jsonl,
     inspect_builder_event_samples,
@@ -21,6 +23,7 @@ from spark_cli.system_map import (
     inspect_builder_trace_groups,
     inspect_spawner_prd_auto_trace,
     inspect_telegram_final_answer_gate,
+    parse_branch_status,
     safe_builder_event_value,
     summarize_pids,
     summarize_setup,
@@ -60,6 +63,7 @@ class SparkSystemMapTests(unittest.TestCase):
                     [
                         json.dumps({"event_type": "route_selected", "summary": "private text"}),
                         json.dumps({"event_type": "route_selected", "token": "secret"}),
+                        json.dumps({"event_type": "route_selected", "chat_id": "123456"}),
                         "{not-json",
                     ]
                 ),
@@ -68,13 +72,55 @@ class SparkSystemMapTests(unittest.TestCase):
             summary = count_safe_jsonl(path)
 
         encoded = json.dumps(summary)
-        self.assertEqual(summary["line_count"], 3)
-        self.assertEqual(summary["parsed_count"], 2)
+        self.assertEqual(summary["line_count"], 4)
+        self.assertEqual(summary["parsed_count"], 3)
         self.assertEqual(summary["parse_errors"], 1)
-        self.assertEqual(summary["safe_value_counts"]["event_type"]["route_selected"], 2)
+        self.assertEqual(summary["safe_value_counts"]["event_type"]["route_selected"], 3)
+        self.assertGreaterEqual(summary["redacted_key_name_count"], 2)
         self.assertIn("summary", summary["top_keys"])
+        self.assertNotIn("chat_id", summary["top_keys"])
+        self.assertNotIn("token", summary["top_keys"])
         self.assertNotIn("private text", encoded)
         self.assertNotIn("secret", encoded)
+
+    def test_repo_board_and_voice_surface_are_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "spark-cli"
+            repo.mkdir()
+            (repo / ".git").mkdir()
+            board = build_repo_board(
+                {
+                    "registry": {"modules": {"spark-cli": {}}},
+                    "installed_modules": {},
+                    "discovered_repos": [
+                        {
+                            "name": "spark-cli",
+                            "path": str(repo),
+                            "spark_toml": {"module_name": "spark-cli"},
+                            "contract_files": ["spark.toml"],
+                        }
+                    ],
+                }
+            )
+        view = build_voice_surface_view({"installed_modules": {}, "discovered_repos": [{"name": "spark-voice-comms"}]})
+        encoded = json.dumps({"board": board, "voice": view})
+
+        self.assertEqual(board["schema_version"], "spark.repo_board.compiled.v0")
+        self.assertEqual(board["repos"][0]["risk_class"], "critical")
+        self.assertEqual(view["schema_version"], "spark.voice_surface_view.compiled.v0")
+        self.assertFalse(view["memory_policy"]["raw_audio_exported_to_os_artifacts"])
+        self.assertIn("not installed", " ".join(view["blockers"]))
+        self.assertNotIn("README.md", encoded)
+        self.assertNotIn("transcript body", encoded.lower())
+
+    def test_parse_branch_status_handles_unborn_branch(self) -> None:
+        parsed = parse_branch_status("## No commits yet on master")
+
+        self.assertEqual(parsed["branch"], "master")
+        self.assertIsNone(parsed["upstream"])
+        self.assertEqual(parsed["ahead"], 0)
+        self.assertEqual(parsed["behind"], 0)
 
     def test_cross_system_trace_samples_keep_join_metadata_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -143,6 +189,9 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertEqual(final_summary["sample_count"], 1)
         self.assertEqual(final_summary["samples"][0]["outcome"], "delivered")
         self.assertEqual(final_summary["trace_join"]["status"], "missing_join_key")
+        self.assertGreaterEqual(final_summary["redacted_key_name_count"], 2)
+        self.assertNotIn("chat_id", final_summary["top_keys"])
+        self.assertNotIn("user_id", final_summary["top_keys"])
         self.assertEqual(spawner_summary["join_keys"]["request_id_count"], 2)
         self.assertEqual(spawner_summary["join_keys"]["mission_id_count"], 1)
         self.assertEqual(spawner_summary["join_keys"]["trace_ref_count"], 0)
@@ -822,6 +871,9 @@ routes = []
             self.assertTrue((out / "capability-catalog.json").exists())
             self.assertTrue((out / "trace-index.json").exists())
             self.assertTrue((out / "memory-movement-index.json").exists())
+            self.assertTrue((out / "repo-board.json").exists())
+            self.assertTrue((out / "voice-surface-view.json").exists())
+            self.assertTrue((out / "operating-cockpit.json").exists())
             self.assertNotIn("telegram.bot_token", output_text)
             self.assertNotIn("webhook_url", output_text)
 
