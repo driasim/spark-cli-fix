@@ -3285,11 +3285,6 @@ def build_voice_surface_view(system_map: dict[str, Any]) -> dict[str, Any]:
         "spark-intelligence-builder",
         "src/spark_intelligence/adapters/telegram/runtime.py",
         "voice_transcript_preview",
-    ) or source_file_contains(
-        "spark-intelligence-builder",
-        "src/spark_intelligence/adapters/telegram/runtime.py",
-        "_build_voice_trace_fields",
-        "transcript",
     )
     telegram_has_voice_bridge = source_file_contains(
         "spark-telegram-bot",
