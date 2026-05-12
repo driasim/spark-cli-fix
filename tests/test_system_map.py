@@ -677,6 +677,40 @@ class SparkSystemMapTests(unittest.TestCase):
                 "My private fact",
                 encoding="utf-8",
             )
+            conn = sqlite3.connect(builder_home / "state.db")
+            try:
+                conn.execute(
+                    """
+                    create table memory_lane_records(
+                        lane_record_id text,
+                        request_id text,
+                        trace_ref text,
+                        artifact_lane text,
+                        status text,
+                        evidence_json text
+                    )
+                    """
+                )
+                conn.executemany(
+                    """
+                    insert into memory_lane_records(
+                        lane_record_id,
+                        request_id,
+                        trace_ref,
+                        artifact_lane,
+                        status,
+                        evidence_json
+                    )
+                    values (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        ("lane-1", "req-private-1", "trace-private-1", "working_scratchpad", "blocked", "private memory body"),
+                        ("lane-2", "req-private-2", "", "episodic_trace", "captured", "private prompt should stay out"),
+                    ],
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
             index = build_memory_movement_index(builder_home)
 
@@ -685,11 +719,26 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertEqual(index["safe_status_export"]["status"]["movement_counts"]["accepted"], 3)
         self.assertEqual(index["memory_kb_artifacts"]["lane_counts"]["current_state"]["file_count"], 1)
         self.assertGreater(index["safe_status_export"]["raw_hint_key_count"], 0)
+        trace_join = index["builder_memory_tables"]["memory_lane_trace_join"]
+        self.assertEqual(trace_join["status"], "present")
+        self.assertEqual(trace_join["row_count"], 2)
+        self.assertEqual(trace_join["trace_ref_present_count"], 1)
+        self.assertEqual(trace_join["missing_trace_ref_count"], 1)
+        self.assertEqual(
+            index["memory_review_queue"]["counts"]["memory_lane_trace_join"]["trace_ref_present_count"],
+            1,
+        )
         self.assertEqual(index["memory_review_queue"]["schema_version"], "spark.memory_review_queue.v1")
         self.assertGreater(index["memory_review_queue"]["counts"]["item_count"], 0)
         self.assertTrue(all(item.get("operator_paths") for item in index["memory_review_queue"]["items"]))
         self.assertTrue(
             any(item["reason_code"] == "raw_memory_hint_keys_omitted" for item in index["memory_review_queue"]["items"])
+        )
+        self.assertTrue(
+            any(
+                item["reason_code"] == "memory_lane_rows_partially_missing_trace_ref"
+                for item in index["memory_review_queue"]["items"]
+            )
         )
         redaction_item = next(
             item
@@ -702,6 +751,9 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertNotIn("telegram-token-value", encoded)
         self.assertNotIn("human-telegram-123-profile-preferred-name", encoded)
         self.assertNotIn("raw_text", encoded)
+        self.assertNotIn("trace-private-1", encoded)
+        self.assertNotIn("req-private-1", encoded)
+        self.assertNotIn("private memory body", encoded)
         self.assertNotIn("subject", index["safe_status_export"]["omitted_top_level_keys"])
 
     def test_capability_catalog_projects_labs_and_swarm_surfaces_without_bodies(self) -> None:

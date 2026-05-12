@@ -2038,6 +2038,8 @@ def memory_review_operator_paths(
 def build_memory_review_queue(memory_index: dict[str, Any]) -> dict[str, Any]:
     safe_status = as_dict(memory_index.get("safe_status_export"))
     status = as_dict(safe_status.get("status"))
+    builder_memory_tables = as_dict(memory_index.get("builder_memory_tables"))
+    memory_lane_trace_join = as_dict(builder_memory_tables.get("memory_lane_trace_join"))
     movement_counts = as_dict(status.get("movement_counts"))
     authority_counts = as_dict(status.get("authority_counts"))
     source_family_counts = as_dict(status.get("source_family_counts"))
@@ -2171,7 +2173,10 @@ def build_memory_review_queue(memory_index: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
-    if row_count:
+    trace_join_row_count = int(memory_lane_trace_join.get("row_count") or 0)
+    trace_ref_present_count = int(memory_lane_trace_join.get("trace_ref_present_count") or 0)
+    missing_trace_ref_count = int(memory_lane_trace_join.get("missing_trace_ref_count") or 0)
+    if row_count and not trace_ref_present_count:
         items.append(
             memory_review_item(
                 item_id="memory-trace-join-not-compiled",
@@ -2185,6 +2190,25 @@ def build_memory_review_queue(memory_index: dict[str, Any]) -> dict[str, Any]:
                 request_id_present=None,
                 trace_ref_present=None,
                 target_kind="movement_rows",
+            )
+        )
+    elif trace_join_row_count and missing_trace_ref_count:
+        items.append(
+            memory_review_item(
+                item_id="memory-trace-join-partial",
+                severity="medium",
+                category="trace_join",
+                owner_repo="spark-intelligence-builder",
+                source_surface="Builder memory_lane_records",
+                reason_code="memory_lane_rows_partially_missing_trace_ref",
+                recommended_action=(
+                    "Keep routing new memory preflight and promotion events through Builder event envelopes; "
+                    "audit legacy rows before any cleanup."
+                ),
+                count=missing_trace_ref_count,
+                request_id_present=bool(memory_lane_trace_join.get("request_id_present_count")),
+                trace_ref_present=True,
+                target_kind="memory_lane_records",
             )
         )
 
@@ -2210,6 +2234,13 @@ def build_memory_review_queue(memory_index: dict[str, Any]) -> dict[str, Any]:
             "authority_counts": authority_counts,
             "source_family_counts": source_family_counts,
             "record_counts": record_counts,
+            "memory_lane_trace_join": {
+                "status": memory_lane_trace_join.get("status"),
+                "row_count": trace_join_row_count,
+                "request_id_present_count": memory_lane_trace_join.get("request_id_present_count"),
+                "trace_ref_present_count": trace_ref_present_count,
+                "missing_trace_ref_count": missing_trace_ref_count,
+            },
         },
         "items": items,
         "non_override_rules": as_list(status.get("non_override_rules")),
@@ -2228,6 +2259,7 @@ def inspect_builder_memory_tables(builder_home: Path) -> dict[str, Any]:
 
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
         try:
             tables = [row[0] for row in conn.execute("select name from sqlite_master where type='table' order by name")]
             memory_tables = [table for table in tables if "memory" in table.lower()]
@@ -2236,10 +2268,81 @@ def inspect_builder_memory_tables(builder_home: Path) -> dict[str, Any]:
             for table in memory_tables:
                 count = conn.execute(f'select count(*) from "{table}"').fetchone()[0]
                 out["tables"][table] = {"row_count": int(count)}
+            if "memory_lane_records" in memory_tables:
+                out["memory_lane_trace_join"] = inspect_memory_lane_trace_join(conn)
         finally:
             conn.close()
     except Exception as exc:
         out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+def inspect_memory_lane_trace_join(conn: sqlite3.Connection) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "source": "memory_lane_records",
+        "redaction": "aggregate trace coverage only; row ids, trace ids, evidence JSON, memory bodies, and source refs omitted",
+    }
+    columns = [row[1] for row in conn.execute("pragma table_info(memory_lane_records)")]
+    required = {"request_id", "trace_ref", "artifact_lane", "status"}
+    missing = sorted(required - set(columns))
+    if missing:
+        out["status"] = "missing_columns"
+        out["missing_columns"] = missing
+        return out
+
+    row_count = int(conn.execute("select count(*) from memory_lane_records").fetchone()[0])
+    request_id_present_count = int(
+        conn.execute(
+            "select count(*) from memory_lane_records where request_id is not null and trim(request_id) <> ''"
+        ).fetchone()[0]
+    )
+    trace_ref_present_count = int(
+        conn.execute(
+            "select count(*) from memory_lane_records where trace_ref is not null and trim(trace_ref) <> ''"
+        ).fetchone()[0]
+    )
+    distinct_trace_ref_count = int(
+        conn.execute(
+            "select count(distinct trace_ref) from memory_lane_records where trace_ref is not null and trim(trace_ref) <> ''"
+        ).fetchone()[0]
+    )
+    lane_rows = conn.execute(
+        """
+        select
+            coalesce(nullif(trim(artifact_lane), ''), 'unknown') as artifact_lane,
+            coalesce(nullif(trim(status), ''), 'unknown') as status,
+            count(*) as row_count,
+            sum(case when request_id is not null and trim(request_id) <> '' then 1 else 0 end) as request_id_present_count,
+            sum(case when trace_ref is not null and trim(trace_ref) <> '' then 1 else 0 end) as trace_ref_present_count
+        from memory_lane_records
+        group by coalesce(nullif(trim(artifact_lane), ''), 'unknown'), coalesce(nullif(trim(status), ''), 'unknown')
+        order by row_count desc
+        limit 25
+        """
+    ).fetchall()
+    out.update(
+        {
+            "status": "present" if trace_ref_present_count else "missing_trace_refs",
+            "row_count": row_count,
+            "request_id_present_count": request_id_present_count,
+            "trace_ref_present_count": trace_ref_present_count,
+            "missing_request_id_count": max(0, row_count - request_id_present_count),
+            "missing_trace_ref_count": max(0, row_count - trace_ref_present_count),
+            "distinct_trace_ref_count": distinct_trace_ref_count,
+            "trace_ref_coverage_ratio": round(trace_ref_present_count / row_count, 4) if row_count else 0.0,
+            "request_id_coverage_ratio": round(request_id_present_count / row_count, 4) if row_count else 0.0,
+            "lane_status_counts": [
+                {
+                    "artifact_lane": str(row["artifact_lane"]),
+                    "status": str(row["status"]),
+                    "row_count": int(row["row_count"] or 0),
+                    "request_id_present_count": int(row["request_id_present_count"] or 0),
+                    "trace_ref_present_count": int(row["trace_ref_present_count"] or 0),
+                }
+                for row in lane_rows
+            ],
+        }
+    )
     return out
 
 
