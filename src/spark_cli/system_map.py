@@ -2996,17 +2996,28 @@ def inspect_builder_trace_health(builder_home: Path) -> dict[str, Any]:
                         limit 30
                         """
                     ).fetchall()
+                    row_items = []
+                    for row in rows:
+                        values = {
+                            column: str(row[index] or "[missing]") for index, column in enumerate(group_columns)
+                        }
+                        row_items.append(
+                            {
+                                **values,
+                                "event_count": int(row[len(group_columns)] or 0),
+                                **builder_trace_missing_source_state(
+                                    conn,
+                                    group_columns=group_columns,
+                                    values=values,
+                                    columns=columns,
+                                ),
+                            }
+                        )
                     out["missing_trace_ref_sources"] = {
                         "group_by": group_columns,
                         "limit": 30,
                         "redaction": "aggregate counts grouped by allowlisted event metadata only",
-                        "rows": [
-                            {
-                                **{column: str(row[index] or "[missing]") for index, column in enumerate(group_columns)},
-                                "event_count": int(row[len(group_columns)] or 0),
-                            }
-                            for row in rows
-                        ],
+                        "rows": row_items,
                     }
             if {"severity", "status"}.issubset(columns):
                 high_open = conn.execute(
@@ -3148,6 +3159,97 @@ def _builder_trace_recent_windows(conn: sqlite3.Connection) -> list[dict[str, An
             }
         )
     return rows
+
+
+def builder_trace_missing_source_state(
+    conn: sqlite3.Connection,
+    *,
+    group_columns: list[str],
+    values: dict[str, str],
+    columns: list[str],
+) -> dict[str, Any]:
+    if "trace_ref" not in columns:
+        return {}
+
+    where_sql, params = builder_trace_group_where(group_columns, values)
+    order_column = "created_at" if "created_at" in columns else "rowid"
+    latest = conn.execute(
+        f"""
+        select trace_ref, request_id{', created_at' if 'created_at' in columns else ''}
+        from builder_events
+        where {where_sql}
+        order by "{order_column}" desc
+        limit 1
+        """,
+        params,
+    ).fetchone()
+    out: dict[str, Any] = {
+        "latest_event_trace_state": "unknown",
+        "latest_event_trace_ref_present": False,
+        "latest_event_request_id_present": False,
+    }
+    if latest is not None:
+        latest_trace_ref = str(latest[0] or "").strip()
+        latest_request_id = str(latest[1] or "").strip()
+        out["latest_event_trace_ref_present"] = bool(latest_trace_ref)
+        out["latest_event_request_id_present"] = bool(latest_request_id)
+        out["latest_event_trace_state"] = "trace_ref_present" if latest_trace_ref else "missing_trace_ref"
+        if "created_at" in columns:
+            out["latest_event_created_at"] = str(latest[2] or "")
+
+    if "created_at" in columns:
+        now = datetime.now(timezone.utc)
+        for label, delta in (("1h", timedelta(hours=1)), ("24h", timedelta(hours=24))):
+            threshold = (now - delta).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            count_params = [threshold, *params]
+            total = conn.execute(
+                f"""
+                select count(*)
+                from builder_events
+                where created_at >= ?
+                  and {where_sql}
+                """,
+                count_params,
+            ).fetchone()[0]
+            missing = conn.execute(
+                f"""
+                select count(*)
+                from builder_events
+                where created_at >= ?
+                  and {where_sql}
+                  and (trace_ref is null or trim(trace_ref) = '')
+                """,
+                count_params,
+            ).fetchone()[0]
+            out[f"recent_{label}_row_count"] = int(total or 0)
+            out[f"recent_{label}_missing_trace_ref_count"] = int(missing or 0)
+
+    latest_clean = bool(out.get("latest_event_trace_ref_present"))
+    recent_24h_missing = int(out.get("recent_24h_missing_trace_ref_count") or 0)
+    if latest_clean and recent_24h_missing:
+        out["repair_temporal_state"] = "latest_clean_historical_window_debt"
+    elif latest_clean:
+        out["repair_temporal_state"] = "latest_clean"
+    elif latest is not None and int(out.get("recent_24h_row_count") or 0) == 0:
+        out["repair_temporal_state"] = "stale_missing_trace_ref"
+    elif latest is not None:
+        out["repair_temporal_state"] = "latest_missing_trace_ref"
+    else:
+        out["repair_temporal_state"] = "unknown"
+    return out
+
+
+def builder_trace_group_where(group_columns: list[str], values: dict[str, str]) -> tuple[str, list[str]]:
+    clauses: list[str] = []
+    params: list[str] = []
+    for column in group_columns:
+        value = str(values.get(column) or "[missing]")
+        if value == "[missing]":
+            clauses.append(f'("{column}" is null or trim("{column}") = "")')
+        else:
+            clauses.append(f'coalesce(nullif(trim("{column}"), \'\'), \'[missing]\') = ?')
+            params.append(value)
+    return " and ".join(clauses) if clauses else "1 = 1", params
 
 
 def build_modules(
@@ -3813,7 +3915,16 @@ def build_trace_repair_queue(trace_index: dict[str, Any]) -> list[dict[str, Any]
         owner = trace_repair_owner(component)
         rank_reason = "largest Builder producer bucket missing trace_ref"
         safe_fix = "Thread the active request_id/trace_ref into this event producer before recording black-box events."
-        if historical_scope:
+        temporal_state = str(row.get("repair_temporal_state") or "")
+        latest_clean = temporal_state in {"latest_clean", "latest_clean_historical_window_debt"}
+        stale_missing = temporal_state == "stale_missing_trace_ref"
+        if latest_clean:
+            rank_reason = "latest Builder row for this producer carries trace_ref; older rows remain in the aggregate window"
+            safe_fix = "Watch for new missing-trace rows; no source patch is needed unless the producer regresses."
+        elif stale_missing:
+            rank_reason = "historical Builder producer bucket has no recent rows; latest known row predates the active window"
+            safe_fix = "Reproduce the producer before patching; this may be stale backlog rather than current runtime behavior."
+        elif historical_scope:
             rank_reason = "historical Builder backlog missing trace_ref; recent trace window is clean"
             safe_fix = (
                 "Verify whether this historical bucket still reproduces; new traffic may already carry trace refs."
@@ -3821,7 +3932,7 @@ def build_trace_repair_queue(trace_index: dict[str, Any]) -> list[dict[str, Any]
         queue.append(
             {
                 "id": trace_repair_id("builder", component, event_type, "missing-trace-ref"),
-                "priority": "medium" if historical_scope else "high",
+                "priority": "medium" if historical_scope or latest_clean or stale_missing else "high",
                 "rank_reason": rank_reason,
                 "owner_repo": owner.get("owner_repo"),
                 "source_module": owner.get("source_module"),
@@ -3829,7 +3940,13 @@ def build_trace_repair_queue(trace_index: dict[str, Any]) -> list[dict[str, Any]
                 "event_type": event_type,
                 "missing_field": "trace_ref",
                 "observed_event_count": int(row.get("event_count") or 0),
-                "temporal_scope": "historical_backlog" if historical_scope else "current_or_unknown",
+                "temporal_scope": temporal_state or ("historical_backlog" if historical_scope else "current_or_unknown"),
+                "latest_event_trace_state": row.get("latest_event_trace_state"),
+                "latest_event_trace_ref_present": bool(row.get("latest_event_trace_ref_present")),
+                "latest_event_request_id_present": bool(row.get("latest_event_request_id_present")),
+                "recent_1h_missing_trace_ref_count": int(row.get("recent_1h_missing_trace_ref_count") or 0),
+                "recent_24h_missing_trace_ref_count": int(row.get("recent_24h_missing_trace_ref_count") or 0),
+                "recent_24h_row_count": int(row.get("recent_24h_row_count") or 0),
                 "current_health_status": current_health.get("status"),
                 "current_window": current_health.get("window"),
                 "current_window_missing_trace_ref_count": int(current_health.get("missing_trace_ref_count") or 0),
@@ -3877,19 +3994,26 @@ def build_builder_trace_repair_cards(trace_index: dict[str, Any]) -> dict[str, A
             continue
         component = str(item.get("event_producer_family") or "builder_events")
         event_type = str(item.get("event_type") or "unknown")
+        temporal_scope = str(item.get("temporal_scope") or "")
+        if temporal_scope == "latest_clean_historical_window_debt":
+            status = "latest_clean_historical_window_debt"
+        elif temporal_scope == "latest_clean":
+            status = "latest_clean"
+        elif temporal_scope == "stale_missing_trace_ref":
+            status = "stale_missing_trace_ref"
+        elif current_health.get("repair_scope") == "current":
+            status = "current"
+        elif current_health.get("repair_scope") == "historical_backlog":
+            status = "historical_backlog"
+        else:
+            status = "unknown"
         cards.append(
             {
                 "schema_version": "spark.builder_trace_repair_card.v0",
                 "id": item.get("id") or trace_repair_id("builder", component, event_type, "missing-trace-ref"),
                 "category": "missing_trace_ref",
                 "title": f"Thread trace_ref into {component} / {event_type}",
-                "status": (
-                    "current"
-                    if current_health.get("repair_scope") == "current"
-                    else "historical_backlog"
-                    if current_health.get("repair_scope") == "historical_backlog"
-                    else "unknown"
-                ),
+                "status": status,
                 "priority": item.get("priority") or "high",
                 "owner_repo": "spark-intelligence-builder",
                 "source_module": item.get("source_module") or f"{component} event emission",
@@ -3901,6 +4025,12 @@ def build_builder_trace_repair_cards(trace_index: dict[str, Any]) -> dict[str, A
                 "current_window_row_count": int(current_health.get("row_count") or 0),
                 "current_window_missing_trace_ref_count": int(current_health.get("missing_trace_ref_count") or 0),
                 "total_missing_trace_ref_count": int(current_health.get("total_missing_trace_ref_count") or 0),
+                "latest_event_trace_state": item.get("latest_event_trace_state") or "unknown",
+                "latest_event_trace_ref_present": bool(item.get("latest_event_trace_ref_present")),
+                "latest_event_request_id_present": bool(item.get("latest_event_request_id_present")),
+                "recent_1h_missing_trace_ref_count": int(item.get("recent_1h_missing_trace_ref_count") or 0),
+                "recent_24h_missing_trace_ref_count": int(item.get("recent_24h_missing_trace_ref_count") or 0),
+                "recent_24h_row_count": int(item.get("recent_24h_row_count") or 0),
                 "evidence": item.get("rank_reason") or "Builder event producer bucket is missing trace_ref.",
                 "recommended_action": item.get("safe_fix")
                 or "Thread active request_id and trace_ref into the event producer before recording Builder events.",

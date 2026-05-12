@@ -620,6 +620,42 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertNotIn("private contradiction summary", encoded)
         self.assertNotIn("private memory body", encoded)
 
+    def test_builder_trace_repair_cards_mark_latest_clean_sources(self) -> None:
+        trace_index = {
+            "builder_trace_health": {
+                "missing_trace_ref_count": 12,
+                "recent_windows": [
+                    {"window": "24h", "row_count": 4, "missing_trace_ref_count": 1, "missing_trace_ref_ratio": 0.25},
+                ],
+                "missing_trace_ref_sources": {
+                    "rows": [
+                        {
+                            "component": "attachment_snapshot",
+                            "event_type": "plugin_or_chip_influence_recorded",
+                            "event_count": 12,
+                            "latest_event_trace_state": "trace_ref_present",
+                            "latest_event_trace_ref_present": True,
+                            "latest_event_request_id_present": True,
+                            "recent_1h_missing_trace_ref_count": 0,
+                            "recent_24h_missing_trace_ref_count": 1,
+                            "recent_24h_row_count": 4,
+                            "repair_temporal_state": "latest_clean_historical_window_debt",
+                        }
+                    ]
+                },
+            }
+        }
+        trace_index["trace_current_health"] = build_trace_current_health(trace_index)
+        trace_index["trace_repair_queue"] = build_trace_repair_queue(trace_index)
+        cards = build_builder_trace_repair_cards(trace_index)
+
+        card = cards["items"][0]
+        self.assertEqual(card["status"], "latest_clean_historical_window_debt")
+        self.assertEqual(card["priority"], "medium")
+        self.assertTrue(card["latest_event_trace_ref_present"])
+        self.assertEqual(card["recent_24h_missing_trace_ref_count"], 1)
+        self.assertIn("Watch for new missing-trace rows", card["recommended_action"])
+
     def test_cross_system_trace_samples_keep_join_metadata_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1538,6 +1574,8 @@ const REQUIRED_PUBLICATION_CHECKS = ["spark-insight-schema", "spark-insight-secr
         self.assertEqual(health["high_severity_open_sources"]["rows"][0]["event_count"], 1)
         self.assertEqual(health["missing_trace_ref_sources"]["rows"][0]["component"], "answer")
         self.assertEqual(health["missing_trace_ref_sources"]["rows"][0]["event_count"], 1)
+        self.assertEqual(health["missing_trace_ref_sources"]["rows"][0]["latest_event_trace_state"], "missing_trace_ref")
+        self.assertEqual(health["missing_trace_ref_sources"]["rows"][0]["recent_24h_missing_trace_ref_count"], 1)
         self.assertEqual(health["recent_windows"][0]["row_count"], 4)
         self.assertEqual(health["recent_windows"][0]["missing_trace_ref_count"], 1)
         self.assertIn("missing_trace_refs", health["health_flags"])
