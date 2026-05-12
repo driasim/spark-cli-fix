@@ -3572,6 +3572,13 @@ def build_trace_index(spark_home: Path, builder_home: Path) -> dict[str, Any]:
 
 
 def build_memory_movement_index(builder_home: Path) -> dict[str, Any]:
+    builder_memory_tables = inspect_builder_memory_tables(builder_home)
+    trace_join = as_dict(builder_memory_tables.get("memory_lane_trace_join"))
+    trace_bridge_instruction = (
+        "Audit legacy memory lane rows missing trace refs before cleanup; new memory preflight events should keep request_id and trace_ref."
+        if trace_join.get("status") == "present"
+        else "Join memory movement events to trace ids once Builder event envelopes carry stable trace refs."
+    )
     memory_index = {
         "schema_version": MEMORY_MOVEMENT_INDEX_SCHEMA,
         "generated_at": utc_now(),
@@ -3580,14 +3587,14 @@ def build_memory_movement_index(builder_home: Path) -> dict[str, Any]:
             "metadata-only memory movement index; no raw memory text, row bodies, profile facts, "
             "conversation turns, evidence payloads, or Telegram update payloads emitted"
         ),
-        "builder_memory_tables": inspect_builder_memory_tables(builder_home),
+        "builder_memory_tables": builder_memory_tables,
         "safe_status_export": read_memory_movement_status_export(builder_home),
         "memory_kb_artifacts": summarize_memory_kb_artifacts(builder_home),
         "memory_run_artifacts": summarize_memory_run_artifacts(builder_home),
         "next_required_bridges": [
             "Have Builder write artifacts/memory-movement-index/memory-movement-status.json from inspect_memory_movement_status().",
             "Have domain-chip-memory expose movement counts by lane, authority, source family, and record type without record text.",
-            "Join memory movement events to trace ids once Builder event envelopes carry stable trace refs.",
+            trace_bridge_instruction,
             "Promote this index into Builder AOC and cockpit as evidence only, never as instructions or profile truth.",
         ],
     }
