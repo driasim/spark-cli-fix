@@ -21,6 +21,7 @@ from spark_cli.system_map import (
     build_trace_current_health,
     build_trace_repair_queue,
     build_spark_os_review_candidates,
+    build_latest_spawner_job_evidence,
     build_voice_surface_view,
     collect_repo_metadata,
     compile_system_map,
@@ -884,6 +885,110 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertNotIn("req-private-1", encoded)
         self.assertNotIn("trace-private-1", encoded)
         self.assertNotIn("private prompt should stay out", encoded)
+        self.assertNotIn("artifact body should stay out", encoded)
+
+    def test_latest_spawner_job_evidence_prefers_executed_agent_event_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            (state / "mission-control.json").write_text(
+                json.dumps({"recent": [{"missionId": "mission-private-1", "status": "completed"}]}),
+                encoding="utf-8",
+            )
+            (state / "prd-auto-trace.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "ts": "2026-05-12T03:00:00Z",
+                                "event": "request_written",
+                                "requestId": "req-private-1",
+                                "traceRef": "trace-private-1",
+                                "projectName": "private prompt should stay out",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "ts": "2026-05-12T03:00:01Z",
+                                "event": "auto_worker_dispatch",
+                                "requestId": "req-private-1",
+                                "traceRef": "trace-private-1",
+                                "missionId": "mission-private-1",
+                                "provider": "configured-provider",
+                                "workingDirectory": "C:/private/path",
+                            }
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (state / "agent-events.jsonl").write_text(
+                json.dumps(
+                    {
+                        "created_at": "2026-05-12T03:00:02Z",
+                        "event_type": "provider_result_received",
+                        "request_id": "req-private-1",
+                        "trace_ref": "trace-private-1",
+                        "facts": {
+                            "mission_id": "mission-private-1",
+                            "provider": "codex",
+                            "model": "gpt-test",
+                            "provider_output": "private output should stay out",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            evidence = build_latest_spawner_job_evidence(state)
+
+        encoded = json.dumps(evidence)
+        self.assertEqual(evidence["schema_version"], "spark.latest_spawner_job_evidence.v1")
+        self.assertEqual(evidence["status"], "present")
+        self.assertEqual(evidence["provider"], "codex")
+        self.assertEqual(evidence["model"], "gpt-test")
+        self.assertEqual(evidence["provider_source"], "agent-events:provider_result_received")
+        self.assertEqual(evidence["confidence"], "high")
+        self.assertIn("agent-events", evidence["joined_sources"])
+        self.assertIn("mission-control", evidence["joined_sources"])
+        self.assertTrue(str(evidence["request_ref_redacted"]).startswith("request_id:redacted:"))
+        self.assertTrue(str(evidence["trace_ref_redacted"]).startswith("trace_ref:redacted:"))
+        self.assertTrue(str(evidence["mission_ref_redacted"]).startswith("mission_id:redacted:"))
+        self.assertNotIn("req-private-1", encoded)
+        self.assertNotIn("trace-private-1", encoded)
+        self.assertNotIn("mission-private-1", encoded)
+        self.assertNotIn("private prompt should stay out", encoded)
+        self.assertNotIn("private output should stay out", encoded)
+        self.assertNotIn("C:/private/path", encoded)
+
+    def test_latest_spawner_job_evidence_blocks_when_latest_provider_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            (state / "prd-auto-trace.jsonl").write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-05-12T04:00:00Z",
+                        "event": "deterministic_static_artifacts_written",
+                        "requestId": "req-private-latest",
+                        "traceRef": "trace-private-latest",
+                        "fileCount": 2,
+                        "artifactBody": "artifact body should stay out",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            evidence = build_latest_spawner_job_evidence(state)
+
+        encoded = json.dumps(evidence)
+        self.assertEqual(evidence["status"], "partial")
+        self.assertEqual(evidence["confidence"], "low")
+        self.assertIn("missing_executed_provider", evidence["blockers"])
+        self.assertIn("agent_events", evidence["missing_sources"])
+        self.assertIsNone(evidence["provider"])
+        self.assertNotIn("req-private-latest", encoded)
+        self.assertNotIn("trace-private-latest", encoded)
         self.assertNotIn("artifact body should stay out", encoded)
 
     def test_spark_os_review_candidates_keep_newest_sample_and_total_count(self) -> None:

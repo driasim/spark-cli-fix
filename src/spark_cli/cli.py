@@ -5793,6 +5793,7 @@ def cmd_os_trace(args: argparse.Namespace) -> int:
     telegram_gate = _safe_mapping(trace_index.get("telegram_final_answer_gate_samples"))
     telegram_join = _safe_mapping(telegram_gate.get("trace_join"))
     authority_verdicts = _safe_mapping(trace_index.get("authority_verdicts"))
+    latest_spawner_job = _safe_mapping(trace_index.get("latest_spawner_job"))
     trace_current_health = _safe_mapping(trace_index.get("trace_current_health"))
     trace_repair_queue = _safe_list(trace_index.get("trace_repair_queue"))
     payload = {
@@ -5805,6 +5806,7 @@ def cmd_os_trace(args: argparse.Namespace) -> int:
         "orphan_parent_event_id_count": _safe_int(trace_health.get("orphan_parent_event_id_count")),
         "authority_verdict_count": _safe_int(authority_verdicts.get("verdict_count")),
         "authority_verdict_counts": _safe_mapping(authority_verdicts.get("verdict_counts")),
+        "latest_spawner_job": latest_spawner_job,
         "health_flags": _safe_list(trace_health.get("health_flags")),
         "recent_windows": _safe_list(trace_health.get("recent_windows")),
         "trace_current_health": trace_current_health,
@@ -5847,6 +5849,16 @@ def cmd_os_trace(args: argparse.Namespace) -> int:
         )
     print(f"- open high-severity events: {payload['high_severity_open_count']}")
     print(f"- authority verdicts: {payload['authority_verdict_count']}")
+    latest_job = _safe_mapping(payload.get("latest_spawner_job"))
+    if latest_job:
+        provider = latest_job.get("provider") or "unproven"
+        model = latest_job.get("model")
+        model_suffix = f" / {model}" if model else ""
+        print(
+            "- latest Spawner job: "
+            f"{latest_job.get('status') or 'unknown'}; provider {provider}{model_suffix}; "
+            f"confidence {latest_job.get('confidence') or 'unknown'}"
+        )
     print(
         "- Spawner request overlaps: "
         f"{cross_system['spawner_builder_request_overlap_count']}/{cross_system['spawner_request_id_count']}"

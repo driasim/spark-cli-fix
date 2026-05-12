@@ -20,6 +20,7 @@ CAPABILITY_CARD_SCHEMA = "spark.capability_card.v1"
 CAPABILITY_PROOF_VERDICTS_SCHEMA = "spark.capability_proof_verdicts.v1"
 TRACE_INDEX_SCHEMA = "spark.trace_index.compiled.v0"
 REVIEW_CANDIDATES_SCHEMA = "spark.os_review_candidates.compiled.v0"
+LATEST_SPAWNER_JOB_SCHEMA = "spark.latest_spawner_job_evidence.v1"
 MEMORY_MOVEMENT_INDEX_SCHEMA = "spark.memory_movement_index.compiled.v0"
 MEMORY_REVIEW_QUEUE_SCHEMA = "spark.memory_review_queue.v1"
 MEMORY_PROOF_CARDS_SCHEMA = "spark.memory_proof_cards.compiled.v1"
@@ -1114,6 +1115,290 @@ def inspect_spawner_authority_verdicts(path: Path) -> dict[str, Any]:
     out["source_policy_counts"] = dict(source_policy_counts.most_common(20))
     out["items"] = list(items)
     return out
+
+
+def build_latest_spawner_job_evidence(spawner_state: Path) -> dict[str, Any]:
+    prd_trace_path = spawner_state / "prd-auto-trace.jsonl"
+    agent_events_path = spawner_state / "agent-events.jsonl"
+    mission_control_path = spawner_state / "mission-control.json"
+    out: dict[str, Any] = {
+        "schema_version": LATEST_SPAWNER_JOB_SCHEMA,
+        "status": "missing",
+        "owner_repo": "spawner-ui",
+        "source": "spawner-ui.state",
+        "paths": {
+            "spawner_prd_trace_exists": prd_trace_path.exists(),
+            "agent_events_exists": agent_events_path.exists(),
+            "mission_control_exists": mission_control_path.exists(),
+        },
+        "joined_sources": [],
+        "missing_sources": [],
+        "blockers": [],
+        "confidence": "blocked",
+        "freshness": "unknown",
+        "provider": None,
+        "model": None,
+        "provider_source": None,
+        "job_kind": "unknown",
+        "verification_command": "spark os trace --json",
+        "redaction": (
+            "metadata-only latest Spawner job evidence; request ids, trace refs, mission ids, prompts, "
+            "provider output, artifact bodies, chat/user ids, memory bodies, transcript/audio, env values, "
+            "and secrets omitted or redacted"
+        ),
+        "data_boundary": {
+            "metadata_only": True,
+            "raw_prompt_exported": False,
+            "provider_output_exported": False,
+            "chat_or_user_id_exported": False,
+            "memory_body_exported": False,
+            "artifact_body_exported": False,
+            "transcript_or_audio_exported": False,
+            "env_or_secret_exported": False,
+        },
+    }
+    groups: dict[str, dict[str, Any]] = {}
+    parse_errors = 0
+
+    parse_errors += _merge_latest_spawner_prd_trace(prd_trace_path, groups)
+    parse_errors += _merge_latest_spawner_agent_events(agent_events_path, groups)
+    mission_refs = _read_mission_control_refs(mission_control_path)
+
+    if parse_errors:
+        out["parse_errors"] = parse_errors
+    if not groups:
+        out["missing_sources"] = ["spawner_prd_trace"]
+        out["blockers"] = ["missing_latest_spawner_job"]
+        return out
+
+    sorted_groups = sorted(
+        groups.values(),
+        key=lambda item: (str(item.get("latest_ts") or ""), str(item.get("key") or "")),
+        reverse=True,
+    )
+    latest = sorted_groups[0]
+    if len(sorted_groups) > 1 and sorted_groups[1].get("latest_ts") == latest.get("latest_ts"):
+        out.update(
+            {
+                "status": "ambiguous",
+                "confidence": "low",
+                "freshness": _freshness_for_ts(latest.get("latest_ts")),
+                "blockers": ["ambiguous_latest_job"],
+                "missing_sources": [],
+            }
+        )
+        return out
+
+    provider = first_string(latest.get("provider"))
+    model = first_string(latest.get("model"))
+    raw_request_id = first_string(latest.get("request_id"))
+    raw_trace_ref = first_string(latest.get("trace_ref"))
+    raw_mission_id = first_string(latest.get("mission_id"))
+    raw_joined_sources = latest.get("joined_sources")
+    joined_sources = set(raw_joined_sources) if isinstance(raw_joined_sources, set) else set(as_list(raw_joined_sources))
+    if raw_mission_id and raw_mission_id in mission_refs:
+        joined_sources.add("mission-control")
+    elif mission_control_path.exists() and not raw_mission_id:
+        joined_sources.add("mission-control")
+
+    missing_sources: list[str] = []
+    blockers: list[str] = []
+    if "spawner-prd-trace" not in joined_sources:
+        missing_sources.append("spawner_prd_trace")
+    if "agent-events" not in joined_sources:
+        missing_sources.append("agent_events")
+    if "mission-control" not in joined_sources:
+        missing_sources.append("mission_control")
+    if not provider:
+        blockers.append("missing_executed_provider")
+    if not (raw_trace_ref or raw_request_id or raw_mission_id):
+        blockers.append("missing_join_key")
+
+    status = "present" if provider else "partial"
+    confidence = "high" if provider and "agent-events" in joined_sources else ("medium" if provider else "low")
+    out.update(
+        {
+            "status": status,
+            "job_kind": safe_short_string(first_string(latest.get("job_kind")) or "spawner_job", limit=80),
+            "latest_ts": safe_short_string(str(latest.get("latest_ts") or ""), limit=80) or None,
+            "freshness": _freshness_for_ts(latest.get("latest_ts")),
+            "provider": safe_short_string(provider, limit=80) if provider else None,
+            "model": safe_short_string(model, limit=120) if model else None,
+            "provider_source": safe_short_string(first_string(latest.get("provider_source")), limit=120) or None,
+            "request_ref_redacted": redacted_identifier("request_id", raw_request_id) if raw_request_id else None,
+            "trace_ref_redacted": redacted_identifier("trace_ref", raw_trace_ref) if raw_trace_ref else None,
+            "mission_ref_redacted": redacted_identifier("mission_id", raw_mission_id) if raw_mission_id else None,
+            "joined_sources": sorted(joined_sources),
+            "missing_sources": missing_sources,
+            "blockers": blockers,
+            "confidence": confidence,
+            "event_counts": dict(Counter(as_dict(latest.get("event_counts"))).most_common(12)),
+        }
+    )
+    return out
+
+
+def _merge_latest_spawner_prd_trace(path: Path, groups: dict[str, dict[str, Any]]) -> int:
+    if not path.exists():
+        return 0
+    parse_errors = 0
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    parse_errors += 1
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                request_id = first_string(payload.get("requestId"), payload.get("request_id"))
+                trace_ref = first_string(payload.get("traceRef"), payload.get("trace_ref"))
+                mission_id = first_string(payload.get("missionId"), payload.get("mission_id"))
+                key = first_string(trace_ref, request_id, mission_id)
+                if not key:
+                    continue
+                group = _latest_spawner_group(groups, key)
+                _merge_spawner_group_identity(group, request_id=request_id, trace_ref=trace_ref, mission_id=mission_id)
+                group["joined_sources"].add("spawner-prd-trace")
+                event = safe_short_string(str(payload.get("event") or "unknown"), limit=80)
+                group["event_counts"][event] += 1
+                _merge_latest_ts(group, payload.get("ts"))
+                build_mode = first_string(payload.get("buildMode"), payload.get("mode"))
+                if build_mode:
+                    group["job_kind"] = safe_short_string(build_mode, limit=80)
+                provider = first_string(payload.get("provider"), payload.get("providerId"), payload.get("resultProvider"))
+                model = first_string(payload.get("model"), payload.get("resultModel"))
+                if provider and event in {"auto_worker_dispatch", "mission_started", "provider_dispatch"}:
+                    group["provider"] = safe_short_string(provider, limit=80)
+                    group["provider_source"] = f"spawner-prd-trace:{event}"
+                if model and not group.get("model"):
+                    group["model"] = safe_short_string(model, limit=120)
+    except Exception:
+        parse_errors += 1
+    return parse_errors
+
+
+def _merge_latest_spawner_agent_events(path: Path, groups: dict[str, dict[str, Any]]) -> int:
+    if not path.exists():
+        return 0
+    parse_errors = 0
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    parse_errors += 1
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                facts = as_dict(payload.get("facts"))
+                request_id = first_string(payload.get("request_id"), payload.get("requestId"), facts.get("request_id"))
+                trace_ref = first_string(payload.get("trace_ref"), payload.get("traceRef"), facts.get("trace_ref"))
+                mission_id = first_string(payload.get("mission_id"), payload.get("missionId"), facts.get("mission_id"))
+                key = first_string(trace_ref, request_id, mission_id)
+                if not key:
+                    continue
+                group = _latest_spawner_group(groups, key)
+                _merge_spawner_group_identity(group, request_id=request_id, trace_ref=trace_ref, mission_id=mission_id)
+                group["joined_sources"].add("agent-events")
+                event = safe_short_string(str(payload.get("event_type") or payload.get("event") or "unknown"), limit=80)
+                group["event_counts"][f"agent:{event}"] += 1
+                _merge_latest_ts(group, first_string(payload.get("created_at"), payload.get("ts")))
+                provider = first_string(
+                    payload.get("provider"),
+                    payload.get("providerId"),
+                    facts.get("provider"),
+                    facts.get("providerId"),
+                )
+                model = first_string(payload.get("model"), facts.get("model"))
+                if provider:
+                    group["provider"] = safe_short_string(provider, limit=80)
+                    group["provider_source"] = f"agent-events:{event}"
+                if model:
+                    group["model"] = safe_short_string(model, limit=120)
+    except Exception:
+        parse_errors += 1
+    return parse_errors
+
+
+def _latest_spawner_group(groups: dict[str, dict[str, Any]], key: str) -> dict[str, Any]:
+    group = groups.setdefault(
+        key,
+        {
+            "key": key,
+            "request_id": None,
+            "trace_ref": None,
+            "mission_id": None,
+            "provider": None,
+            "model": None,
+            "provider_source": None,
+            "job_kind": "spawner_job",
+            "latest_ts": None,
+            "joined_sources": set(),
+            "event_counts": Counter(),
+        },
+    )
+    return group
+
+
+def _merge_spawner_group_identity(group: dict[str, Any], *, request_id: str, trace_ref: str, mission_id: str) -> None:
+    if request_id:
+        group["request_id"] = request_id
+    if trace_ref:
+        group["trace_ref"] = trace_ref
+    if mission_id:
+        group["mission_id"] = mission_id
+
+
+def _merge_latest_ts(group: dict[str, Any], value: Any) -> None:
+    ts = first_string(value)
+    if ts and ts > str(group.get("latest_ts") or ""):
+        group["latest_ts"] = ts
+
+
+def _read_mission_control_refs(path: Path) -> set[str]:
+    refs: set[str] = set()
+    payload, error = read_json(path)
+    if error or payload is None:
+        return refs
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if isinstance(key, str) and key.startswith("mission-"):
+                    refs.add(key)
+                if key in {"missionId", "mission_id", "id"} and isinstance(item, str) and item.startswith("mission-"):
+                    refs.add(item)
+                if isinstance(item, (dict, list)):
+                    visit(item)
+        elif isinstance(value, list):
+            for item in value[:500]:
+                visit(item)
+
+    visit(payload)
+    return refs
+
+
+def _freshness_for_ts(value: Any) -> str:
+    ts = first_string(value)
+    if not ts:
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return "unknown"
+    age = datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)
+    if age < timedelta(hours=24):
+        return "current"
+    if age < timedelta(days=7):
+        return "recent"
+    return "stale"
 
 
 def build_spark_os_review_candidates(path: Path, *, builder_home: Path) -> dict[str, Any]:
@@ -4625,6 +4910,7 @@ def build_trace_index(spark_home: Path, builder_home: Path) -> dict[str, Any]:
             builder_home=builder_home,
         ),
         "authority_verdicts": inspect_spawner_authority_verdicts(spawner_state / "prd-auto-trace.jsonl"),
+        "latest_spawner_job": build_latest_spawner_job_evidence(spawner_state),
         "review_candidates": build_spark_os_review_candidates(
             spawner_state / "prd-auto-trace.jsonl",
             builder_home=builder_home,
@@ -5643,6 +5929,7 @@ def build_operating_cockpit(compiled: dict[str, Any]) -> dict[str, Any]:
                     "card_count"
                 ),
                 "authority_verdict_count": as_dict(trace_index.get("authority_verdicts")).get("verdict_count"),
+                "latest_spawner_job_status": as_dict(trace_index.get("latest_spawner_job")).get("status"),
                 "review_candidate_count": as_dict(as_dict(trace_index.get("review_candidates")).get("counts")).get(
                     "candidate_count"
                 ),
@@ -5687,6 +5974,7 @@ def build_operating_cockpit(compiled: dict[str, Any]) -> dict[str, Any]:
             "items": as_list(duplicate_truths.get("items"))[:10],
         },
         "authority_verdicts": as_list(as_dict(trace_index.get("authority_verdicts")).get("items"))[:5],
+        "latest_spawner_job": as_dict(trace_index.get("latest_spawner_job")),
         "memory_review_queue": as_list(
             as_dict(as_dict(compiled.get("memory_movement_index")).get("memory_review_queue")).get("items")
         )[:5],
