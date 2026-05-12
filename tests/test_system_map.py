@@ -986,7 +986,40 @@ class SparkSystemMapTests(unittest.TestCase):
                     values (?, ?, ?, ?, ?, ?)
                     """,
                     [
-                        ("lane-1", "req-private-1", "trace-private-1", "working_scratchpad", "blocked", "private memory body"),
+                        (
+                            "lane-1",
+                            "req-private-1",
+                            "trace-private-1",
+                            "working_scratchpad",
+                            "blocked",
+                            json.dumps(
+                                {
+                                    "facts": {
+                                        "memory_proof_card": {
+                                            "schema_version": "spark.memory_proof_card.v1",
+                                            "card_id": "memory-proof:test",
+                                            "trace_ref": "trace-private-1",
+                                            "owner_system": "spark-intelligence-builder",
+                                            "surface": "builder",
+                                            "operation": "save_preflight",
+                                            "decision": "support_only",
+                                            "memory_type": "preference",
+                                            "durability_tier": "ephemeral_context",
+                                            "freshness": "live_probed",
+                                            "confidence": 0.85,
+                                            "source_refs": ["telegram:private-chat-123"],
+                                            "relations": ["memory_boundary", "mission_updates"],
+                                            "blocked_reasons": [],
+                                            "human_next_action": "Review Builder memory lane.",
+                                            "correction_path": "Use memory review queue.",
+                                            "data_boundary": "No private payload exported.",
+                                            "memory_body": "My private fact",
+                                            "provider_output": "private model output",
+                                        }
+                                    }
+                                }
+                            ),
+                        ),
                         ("lane-2", "req-private-2", "", "episodic_trace", "captured", "private prompt should stay out"),
                     ],
                 )
@@ -1011,6 +1044,13 @@ class SparkSystemMapTests(unittest.TestCase):
             1,
         )
         self.assertEqual(index["memory_review_queue"]["schema_version"], "spark.memory_review_queue.v1")
+        self.assertEqual(index["memory_proof_cards"]["schema_version"], "spark.memory_proof_cards.compiled.v1")
+        self.assertEqual(index["memory_proof_cards"]["counts"]["item_count"], 1)
+        proof_card = index["memory_proof_cards"]["items"][0]
+        self.assertEqual(proof_card["owner_system"], "spark-intelligence-builder")
+        self.assertEqual(proof_card["decision"], "support_only")
+        self.assertEqual(proof_card["source_ref_count"], 1)
+        self.assertTrue(proof_card["trace_ref_present"])
         self.assertGreater(index["memory_review_queue"]["counts"]["item_count"], 0)
         self.assertTrue(all(item.get("operator_paths") for item in index["memory_review_queue"]["items"]))
         self.assertTrue(
@@ -1036,6 +1076,10 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertNotIn("trace-private-1", encoded)
         self.assertNotIn("req-private-1", encoded)
         self.assertNotIn("private memory body", encoded)
+        self.assertNotIn("private-chat-123", encoded)
+        self.assertNotIn("private model output", encoded)
+        self.assertNotIn("memory_body", encoded)
+        self.assertNotIn("provider_output", encoded)
         self.assertNotIn("subject", index["safe_status_export"]["omitted_top_level_keys"])
 
     def test_capability_catalog_projects_labs_and_swarm_surfaces_without_bodies(self) -> None:
