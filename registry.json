@@ -51,14 +51,14 @@
     },
     "domain-chip-memory": {
       "source": "https://github.com/vibeforge1111/domain-chip-memory",
-      "commit": "7852e22bb7c4ef8c8d43d07f3307a00882430a14",
+      "commit": "aae23128776a129decefb4fca98ad6915bf179f8",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Default memory substrate, benchmark pack, and Telegram memory-check chip",
       "attestation": {
         "type": "git-commit-pin-v1",
         "source": "https://github.com/vibeforge1111/domain-chip-memory",
-        "commit": "7852e22bb7c4ef8c8d43d07f3307a00882430a14"
+        "commit": "aae23128776a129decefb4fca98ad6915bf179f8"
       }
     },
     "spark-voice-comms": {
