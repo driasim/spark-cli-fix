@@ -1286,6 +1286,23 @@ def current_git_commit() -> str:
     return commit
 
 
+def local_git_commit_exists(ref: str) -> bool:
+    normalized = (ref or "").strip().lower()
+    if not GIT_COMMIT_SHA_PATTERN.fullmatch(normalized):
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{normalized}^{{commit}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def installer_manifest_payload() -> dict[str, Any]:
     return {
         "schema": 1,
@@ -1430,6 +1447,24 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
             expected_hosted_release = hosted_release_name
             expected_hosted_ref = hosted_release_ref
             hosted_source_basis = "installed_checkout"
+    local_ref_skipped = hosted and hosted_source_basis == "installed_checkout"
+    local_ref_ok = local_ref_skipped or (bool(expected_ref) and local_git_commit_exists(expected_ref))
+    checks.append(
+        {
+            "name": "local_release_ref_reachable",
+            "ok": local_ref_ok,
+            "expected_ref": expected_ref,
+            "detail": (
+                "Installer source commit reachability was skipped because hosted metadata matches the installed checkout."
+                if local_ref_skipped
+                else (
+                    "Installer source commit exists in the local Spark CLI checkout."
+                    if local_ref_ok
+                    else "Installer source commit is not reachable in the local Spark CLI checkout; a fresh install may fail."
+                )
+            ),
+        }
+    )
     for name, path in INSTALLER_SCRIPT_PATHS.items():
         expected = ""
         if isinstance(installers, dict) and isinstance(installers.get(name), dict):

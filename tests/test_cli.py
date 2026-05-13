@@ -9221,6 +9221,14 @@ class SparkCliTests(unittest.TestCase):
         }
         self.assertEqual(actual, expected)
 
+    def test_installer_integrity_fails_when_source_ref_is_not_reachable(self) -> None:
+        with patch("spark_cli.cli.local_git_commit_exists", return_value=False):
+            committed = collect_installer_integrity_payload()
+        check = next(item for item in committed["checks"] if item["name"] == "local_release_ref_reachable")
+        self.assertFalse(committed["ok"])
+        self.assertFalse(check["ok"])
+        self.assertIn("fresh install may fail", check["detail"])
+
     def test_hosted_installer_checks_use_hosted_checksum_metadata(self) -> None:
         class FakeResponse:
             def __init__(self, payload: bytes) -> None:
