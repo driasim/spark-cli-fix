@@ -2775,6 +2775,25 @@ def primary_telegram_profile(setup_state: dict[str, Any] | None = None) -> str:
     return DEFAULT_PRIMARY_TELEGRAM_PROFILE
 
 
+def telegram_profile_relay_port(
+    setup_state: dict[str, Any] | None,
+    profile: str | None,
+    default: int = 8788,
+) -> int:
+    normalized = normalize_telegram_profile(profile)
+    profiles = setup_state.get("telegram_profiles") if isinstance(setup_state, dict) else None
+    if isinstance(profiles, dict):
+        profile_state = profiles.get(normalized)
+        if isinstance(profile_state, dict):
+            try:
+                relay_port = int(profile_state.get("relay_port", 0))
+            except (TypeError, ValueError):
+                relay_port = 0
+            if relay_port > 0:
+                return relay_port
+    return default
+
+
 def module_process_key(module_name: str, profile: str | None = None) -> str:
     normalized = normalize_telegram_profile(profile)
     if module_name == "spark-telegram-bot" and normalized != DEFAULT_TELEGRAM_PROFILE:
@@ -3648,6 +3667,9 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
     _, llm_env = build_llm_env(args, secret_values)
     relay_secret = secret_values.get("telegram.relay_secret") or py_secrets.token_urlsafe(32)
     workspace_root = str(SPARK_HOME / "workspaces")
+    setup_state = load_json(CONFIG_PATH, {})
+    primary_profile = primary_telegram_profile(setup_state)
+    primary_relay_port = telegram_profile_relay_port(setup_state, primary_profile)
 
     gateway_env = {
         "BOT_TOKEN": secret_values.get("telegram.bot_token", ""),
@@ -3658,8 +3680,8 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
         "SPARK_BUILDER_BRIDGE_MODE": "required",
         "SPAWNER_UI_URL": args.spawner_ui_url or "http://127.0.0.1:3333",
         "TELEGRAM_GATEWAY_MODE": "polling",
-        "TELEGRAM_RELAY_PORT": "8788",
-        "SPARK_TELEGRAM_PROFILE": primary_telegram_profile(),
+        "TELEGRAM_RELAY_PORT": str(primary_relay_port),
+        "SPARK_TELEGRAM_PROFILE": primary_profile,
         "TELEGRAM_RELAY_SECRET": relay_secret,
         "SPARK_ONBOARDING_SESSION": str(getattr(args, "onboarding_session", "") or ""),
         "SPARK_ONBOARDING_EVENT_PATH": str(TELEGRAM_FIRST_MESSAGE_EVENTS_PATH),
@@ -4494,8 +4516,9 @@ def scan_module_trust(module: Module, *, trust_tier: str | None = None) -> list[
     findings: list[ChipScanFinding] = []
     total_bytes = 0
     scanned_files = 0
+    path_type = root.__class__
     for current_root, dir_names, file_names in os.walk(root):
-        current = Path(current_root)
+        current = path_type(current_root)
         dir_names[:] = [name for name in dir_names if name not in CHIP_SCAN_SKIP_DIRS]
         for name in list(dir_names):
             directory = current / name
@@ -5532,6 +5555,10 @@ def refresh_telegram_builder_runtime_refs(
     existing_refs: dict[str, str] = {}
     for values in existing_by_path.values():
         existing_refs.update(values)
+    setup_state_for_profiles = setup_state if isinstance(setup_state, dict) else load_json(CONFIG_PATH, {})
+    primary_profile = primary_telegram_profile(setup_state_for_profiles)
+    primary_relay_port = telegram_profile_relay_port(setup_state_for_profiles, primary_profile)
+    base_gateway_env_path = MODULE_CONFIG_DIR / "spark-telegram-bot.env"
     for path in paths:
         if not path.exists():
             continue
@@ -5539,6 +5566,9 @@ def refresh_telegram_builder_runtime_refs(
         if not current:
             continue
         next_values = dict(current)
+        if path == base_gateway_env_path:
+            next_values["SPARK_TELEGRAM_PROFILE"] = primary_profile
+            next_values["TELEGRAM_RELAY_PORT"] = str(primary_relay_port)
         next_values.update(refs)
         next_values.update(telegram_specialization_runtime_env_refs_from_installed(
             installed_records,
@@ -8599,7 +8629,12 @@ def cmd_sandbox(args: argparse.Namespace) -> int:
 APPROVAL_ENFORCED_ACTION_CLASSES = {
     "credential_mutation",
     "destructive_filesystem",
+    "external_publish",
+    "git_history_mutation",
+    "identity_access_mutation",
     "network_exfiltration",
+    "remote_code_execution",
+    "container_privilege_escalation",
     "process_autostart_mutation",
 }
 
