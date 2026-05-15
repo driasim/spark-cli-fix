@@ -6233,7 +6233,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if getattr(args, "doctor_command", None) == "llm":
         return cmd_doctor_llm(args)
     if getattr(args, "doctor_command", None) == "specialization-loop":
-        payload = collect_specialization_loop_payload()
+        payload = collect_specialization_loop_payload(proof=bool(getattr(args, "proof", False)))
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
@@ -6318,6 +6318,16 @@ def print_plain_specialization_loop_doctor(payload: dict[str, Any]) -> None:
             repair = str(check.get("repair") or "").strip()
             if repair:
                 print(f"- {repair}")
+    proofs = payload.get("status_proofs")
+    if isinstance(proofs, list) and proofs:
+        print("")
+        print("Status proof")
+        for proof in proofs:
+            if not isinstance(proof, dict):
+                continue
+            state = "ready" if proof.get("ok") else "needs attention"
+            detail = str(proof.get("detail") or "").strip()
+            print(f"- {proof.get('path_key', 'path')}: {state}" + (f" - {detail}" if detail else ""))
     print("")
     print("Proof commands")
     for command in payload.get("next_commands", []):
@@ -9733,6 +9743,27 @@ def env_path_candidates(name: str) -> list[Path]:
     return [Path(item).expanduser() for item in raw.split(os.pathsep) if item.strip()]
 
 
+def env_named_path_candidates(prefix: str, suffix: str) -> list[Path]:
+    candidates: list[Path] = []
+    for name, raw in os.environ.items():
+        if not name.startswith(prefix) or not name.endswith(suffix) or not raw.strip():
+            continue
+        candidates.append(Path(raw).expanduser())
+    return candidates
+
+
+def unique_path_candidates(paths: Iterable[Path]) -> list[Path]:
+    seen: set[str] = set()
+    candidates: list[Path] = []
+    for path in paths:
+        key = os.path.normcase(os.path.normpath(str(path.expanduser())))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(path.expanduser())
+    return candidates
+
+
 def installed_path_candidate(installed: object, module_name: str) -> Path | None:
     path = installed_record_path(installed, module_name)
     return path if path is not None and path.exists() else None
@@ -9746,14 +9777,17 @@ def first_existing_path(paths: list[Path]) -> Path | None:
 
 
 def specialization_path_candidates(installed: object) -> list[Path]:
-    candidates = env_path_candidates("SPARK_SPECIALIZATION_PATH_ROOTS")
+    candidates = [
+        *env_path_candidates("SPARK_SPECIALIZATION_PATH_ROOTS"),
+        *env_named_path_candidates("SPARK_SWARM_SPECIALIZATION_PATH_", "_REPO"),
+    ]
     if isinstance(installed, dict):
         for name in sorted(installed):
             if str(name).startswith("specialization-path-"):
                 candidate = installed_path_candidate(installed, str(name))
                 if candidate is not None:
                     candidates.append(candidate)
-    return candidates
+    return unique_path_candidates(candidates)
 
 
 def telegram_gateway_candidates(installed: object) -> list[Path]:
@@ -9780,6 +9814,7 @@ def specialization_path_is_usable(path: Path) -> bool:
     return any(
         candidate.exists()
         for candidate in (
+            path / "specialization-path.json",
             path / "scripts" / "run_autoloop.py",
             path / "specialization-path" / "path.manifest.json",
             path / "path.manifest.json",
@@ -9788,18 +9823,183 @@ def specialization_path_is_usable(path: Path) -> bool:
     )
 
 
-def collect_specialization_loop_payload() -> dict[str, Any]:
+def specialization_path_key(path: Path) -> str:
+    for manifest in (
+        path / "specialization-path.json",
+        path / "specialization-path" / "path.manifest.json",
+        path / "path.manifest.json",
+    ):
+        if not manifest.exists():
+            continue
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            for key in ("pathKey", "path_key", "key"):
+                raw = payload.get(key)
+                if isinstance(raw, str) and raw.strip():
+                    return raw.strip()
+    name = path.name
+    if name.startswith("specialization-path-"):
+        return name.removeprefix("specialization-path-")
+    return name
+
+
+def specialization_loop_status_command(path: Path, swarm_root: Path | None) -> tuple[list[str], dict[str, str]]:
+    python = os.environ.get("SPARK_SWARM_BRIDGE_PYTHON") or sys.executable
+    env = dict(os.environ)
+    if swarm_root:
+        bridge_src = swarm_root / "apps" / "bridge" / "src"
+        if bridge_src.exists():
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = str(bridge_src) if not existing else f"{bridge_src}{os.pathsep}{existing}"
+    return (
+        [
+            python,
+            "-m",
+            "spark_swarm_bridge.cli",
+            "specialization-path",
+            "status",
+            specialization_path_key(path),
+            str(path),
+            "--json",
+        ],
+        env,
+    )
+
+
+def parse_json_object_from_stdout(stdout: str) -> dict[str, Any] | None:
+    text = stdout.strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            payload = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
+def validate_specialization_loop_status_packet(packet: dict[str, Any]) -> tuple[bool, list[str]]:
+    issues: list[str] = []
+    for field in ("schemaId", "pathKey", "decision", "evidenceState", "claimBoundary"):
+        if packet.get(field) in (None, "", []):
+            issues.append(f"missing {field}")
+    decision = str(packet.get("decision") or "").strip().lower()
+    comparison = packet.get("comparison")
+    rounds = packet.get("rounds")
+    evidence_decisions = {"improved", "held_steady", "regressed"}
+    if decision in evidence_decisions:
+        if not isinstance(comparison, dict):
+            issues.append("comparison is not an object")
+            comparison = {}
+        if not isinstance(rounds, dict):
+            issues.append("rounds is not an object")
+            rounds = {}
+        if comparison.get("baselineScore") is None:
+            issues.append("missing comparison.baselineScore")
+        if comparison.get("candidateScore") is None:
+            issues.append("missing comparison.candidateScore")
+        if comparison.get("delta") is None:
+            issues.append("missing comparison.delta")
+        if rounds.get("completed") is None:
+            issues.append("missing rounds.completed")
+    if decision == "improved":
+        held_out = str(packet.get("heldOutStatus") or "").strip().lower()
+        trap = str(packet.get("trapStatus") or "").strip().lower()
+        if held_out not in {"passed", "pass"}:
+            issues.append("improved claim requires held-out proof")
+        if trap not in {"passed", "pass"}:
+            issues.append("improved claim requires trap proof")
+    return not issues, issues
+
+
+def summarize_specialization_loop_status_packet(packet: dict[str, Any]) -> str:
+    label = str(packet.get("pathLabel") or packet.get("pathKey") or "specialization path")
+    decision = str(packet.get("decision") or "unknown").replace("_", " ")
+    comparison = packet.get("comparison") if isinstance(packet.get("comparison"), dict) else {}
+    baseline = comparison.get("baselineScore")
+    candidate = comparison.get("candidateScore")
+    delta = comparison.get("delta")
+    proof = (
+        f"held-out {packet.get('heldOutStatus', 'unknown')}, "
+        f"trap {packet.get('trapStatus', 'unknown')}"
+    )
+    if baseline is not None and candidate is not None and delta is not None:
+        return f"{label} status packet says {decision}; baseline {baseline}, candidate {candidate}, delta {delta}; {proof}."
+    return f"{label} status packet says {decision}; {proof}."
+
+
+def collect_specialization_loop_proofs(paths: list[Path], swarm_root: Path | None) -> list[dict[str, Any]]:
+    proofs: list[dict[str, Any]] = []
+    for path in paths:
+        path_key = specialization_path_key(path)
+        command, env = specialization_loop_status_command(path, swarm_root)
+        proof: dict[str, Any] = {
+            "path": str(path),
+            "path_key": path_key,
+            "ok": False,
+            "detail": "",
+            "issues": [],
+        }
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30, env=env)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            proof["detail"] = f"{path_key} status packet could not be read: {exc}"
+            proof["issues"] = ["status command failed"]
+            proofs.append(proof)
+            continue
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or result.stdout.strip()
+            proof["detail"] = f"{path_key} status command exited {result.returncode}: {stderr[:240]}"
+            proof["issues"] = ["status command failed"]
+            proofs.append(proof)
+            continue
+        packet = parse_json_object_from_stdout(result.stdout)
+        if packet is None:
+            proof["detail"] = f"{path_key} status command did not return a JSON object."
+            proof["issues"] = ["status packet was not JSON"]
+            proofs.append(proof)
+            continue
+        ok, issues = validate_specialization_loop_status_packet(packet)
+        proof.update(
+            {
+                "ok": ok,
+                "detail": summarize_specialization_loop_status_packet(packet),
+                "issues": issues,
+                "packet": packet,
+            }
+        )
+        proofs.append(proof)
+    return proofs
+
+
+def collect_specialization_loop_payload(*, proof: bool = False) -> dict[str, Any]:
     installed = load_json(REGISTRY_PATH, {})
     telegram_root = first_existing_path(telegram_gateway_candidates(installed))
     labs_root = first_existing_path([
         *env_path_candidates("SPARK_DOMAIN_CHIP_LABS_ROOT"),
+        *env_path_candidates("SPARK_DOMAIN_CHIP_LABS_REPO"),
         *(candidate for candidate in [installed_path_candidate(installed, "spark-domain-chip-labs")] if candidate is not None),
     ])
     swarm_root = first_existing_path([
         *env_path_candidates("SPARK_SWARM_ROOT"),
+        *env_path_candidates("SPARK_SWARM_RUNTIME_ROOT"),
         *(candidate for candidate in [installed_path_candidate(installed, "spark-swarm")] if candidate is not None),
     ])
+    sibling_root = swarm_root.parent if swarm_root else None
+    if not labs_root and sibling_root:
+        labs_root = first_existing_path([sibling_root / "spark-domain-chip-labs"])
     path_roots = specialization_path_candidates(installed)
+    if sibling_root:
+        path_roots = unique_path_candidates([*path_roots, *sibling_root.glob("specialization-path-*")])
     usable_paths = [candidate for candidate in path_roots if specialization_path_is_usable(candidate)]
 
     telegram_ok = bool(telegram_root and telegram_gateway_is_usable(telegram_root))
@@ -9816,6 +10016,8 @@ def collect_specialization_loop_payload() -> dict[str, Any]:
         and (swarm_root / "config" / "specialization-paths.json").exists()
     )
     path_ok = bool(usable_paths)
+    status_proofs = collect_specialization_loop_proofs(usable_paths, swarm_root) if proof and usable_paths else []
+    status_proof_ok = bool(status_proofs) and all(bool(item.get("ok")) for item in status_proofs)
 
     checks = [
         {
@@ -9864,6 +10066,21 @@ def collect_specialization_loop_payload() -> dict[str, Any]:
             "paths": [str(path) for path in usable_paths],
         },
     ]
+    if proof:
+        checks.append(
+            {
+                "name": "specialization_loop_status_packet",
+                "ok": status_proof_ok,
+                "required": True,
+                "detail": (
+                    f"{len(status_proofs)} specialization path status packet(s) read and validated."
+                    if status_proof_ok
+                    else "Canonical specialization-loop status packet proof is missing or invalid."
+                ),
+                "repair": "Run `spark-swarm specialization-path status <path_key> <repo> --json` locally and fix missing benchmark evidence before claiming improvement.",
+                "proofs": status_proofs,
+            }
+        )
     ok = all(bool(check["ok"]) for check in checks if check.get("required", True))
     return {
         "ok": ok,
@@ -9873,17 +10090,20 @@ def collect_specialization_loop_payload() -> dict[str, Any]:
         "labs_root": str(labs_root) if labs_root else None,
         "swarm_root": str(swarm_root) if swarm_root else None,
         "specialization_paths": [str(path) for path in usable_paths],
+        "proof_requested": bool(proof),
+        "status_proofs": status_proofs,
         "safe_next_moves": [
             "Run `spark doctor specialization-loop` for plain-language repair guidance.",
             "Set SPARK_TELEGRAM_BOT_ROOT, SPARK_DOMAIN_CHIP_LABS_ROOT, SPARK_SWARM_ROOT, or SPARK_SPECIALIZATION_PATH_ROOTS when repos live outside Spark's installed registry.",
-            "Run benchmark and Swarm status commands only against local paths you choose; Spark CLI does not publish specialization-loop results.",
+            "Use `spark verify --specialization-loop --proof` when you want canonical status-packet proof without starting a run.",
         ],
         "next_commands": [
             "spark verify --specialization-loop --json",
+            "spark verify --specialization-loop --proof --json",
             "chip-labs creator-run-smoke <run-dir> --recompute --fail-on-blocked",
             "spark-swarm specialization-path status <path_key> <repo> --json",
         ],
-        "boundary": "This check only inspects discoverability. It does not start runs, publish, delete, or repair automatically.",
+        "boundary": "This check inspects discoverability. With --proof it also reads canonical status packets. It does not start runs, publish, delete, or repair automatically.",
     }
 
 
@@ -11048,7 +11268,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         return 0 if payload["ok"] else 1
 
     if getattr(args, "specialization_loop", False):
-        payload = collect_specialization_loop_payload()
+        payload = collect_specialization_loop_payload(proof=bool(getattr(args, "proof", False)))
         if args.json:
             print(json.dumps(payload, indent=2))
             return 0 if payload["ok"] else 1
@@ -11058,6 +11278,18 @@ def cmd_verify(args: argparse.Namespace) -> int:
             print(f"{marker} {check['name']}: {check['detail']}")
             if not check["ok"] and check.get("repair"):
                 print(f"      {check['repair']}")
+        proofs = payload.get("status_proofs")
+        if isinstance(proofs, list) and proofs:
+            print("")
+            print("Status proof:")
+            for proof in proofs:
+                if not isinstance(proof, dict):
+                    continue
+                marker = "[OK]" if proof.get("ok") else "[FIX]"
+                print(f"{marker} {proof.get('path_key', 'path')}: {proof.get('detail')}")
+                issues = proof.get("issues")
+                if issues:
+                    print(f"      issues: {', '.join(str(issue) for issue in issues)}")
         safe_next_moves = payload.get("safe_next_moves")
         if isinstance(safe_next_moves, list) and safe_next_moves:
             print("")
@@ -13798,6 +14030,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor_specialization_loop_parser = doctor_subparsers.add_parser("specialization-loop", help="Inspect specialization-loop discoverability without starting runs")
     doctor_specialization_loop_parser.add_argument("--json", action="store_true")
+    doctor_specialization_loop_parser.add_argument("--proof", action="store_true", help="Read canonical specialization-loop status packets without starting runs")
     doctor_specialization_loop_parser.set_defaults(func=cmd_doctor)
 
     doctor_llm_parser = doctor_subparsers.add_parser("llm", help="Ask the user's configured LLM for a redacted Spark repair plan")
@@ -13833,6 +14066,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--registry-pins", action="store_true", help="Verify blessed registry pins match each module's remote HEAD")
     verify_parser.add_argument("--sandboxes", action="store_true", help="Verify optional SSH/Modal sandbox readiness without running cloud smoke jobs")
     verify_parser.add_argument("--specialization-loop", action="store_true", help="Verify Domain Chip Labs, Swarm, and specialization-path loop surfaces are discoverable")
+    verify_parser.add_argument("--proof", action="store_true", help="With --specialization-loop, read canonical status packets without starting runs")
     verify_parser.set_defaults(func=cmd_verify)
 
     smoke_parser = subparsers.add_parser("smoke", help="Run guided first-run Spark smoke checks")
