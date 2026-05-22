@@ -9,11 +9,11 @@ second code-scanning feed.
 
 - Keep `codeql-python` required on `master`.
 - Keep `scorecard` required on `master`.
-- Stop uploading Scorecard SARIF to code scanning; reviewers should use the
-  Scorecard workflow result for supply-chain posture.
+- Stop uploading Scorecard SARIF to code scanning; the Spark jury/CI gate should
+  use the Scorecard workflow result for supply-chain posture.
 - Move CodeQL `security-events: write` to the CodeQL job only.
 - Record any alert dismissal with the exact GitHub alert number, reason, and
-  reviewer rationale.
+  system/jury triage rationale.
 
 ## Reviewed Alerts
 
@@ -27,11 +27,11 @@ second code-scanning feed.
 
 ## Follow-Up Rules
 
-- New CodeQL alerts must be fixed or triaged before merge approval.
+- New CodeQL alerts must be fixed or triaged before `spark-jury-approval`.
 - New Scorecard regressions must be read from the workflow result; they should
   not automatically create code-scanning alerts.
-- Dismissing a CodeQL alert is allowed only when the source path is inspected and
-  the dismissal comment states why it is false positive, used in tests, or
-  intentionally accepted.
+- Dismissing a CodeQL alert is allowed only when the source path is inspected by
+  the jury/CI process and the dismissal comment states why it is false positive,
+  used in tests, or intentionally accepted.
 - `spark-jury-approval` remains the replacement for separate human approval in
   this competition system.
