@@ -5585,12 +5585,16 @@ def write_browser_use_status(payload: dict[str, Any]) -> None:
 
 
 def run_browser_use_command(cli_path: str, *parts: str, timeout: int = 45) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
     return subprocess.run(
         [cli_path, *parts],
         capture_output=True,
         text=True,
         timeout=timeout,
         check=True,
+        env=env,
     )
 
 
@@ -5643,12 +5647,16 @@ def browser_use_probe_payload() -> dict[str, Any]:
         return payload
     finally:
         if cli_path:
+            env = dict(os.environ)
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+            env.setdefault("PYTHONUTF8", "1")
             subprocess.run(
                 [cli_path, "--session", BROWSER_USE_PROBE_SESSION, "close"],
                 capture_output=True,
                 text=True,
                 timeout=20,
                 check=False,
+                env=env,
             )
 
     payload = {
