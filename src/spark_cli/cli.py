@@ -5435,7 +5435,15 @@ def install_memory_sidecar_dependencies(
 
 
 def browser_use_cli_path() -> str | None:
-    return shutil.which("browser-use") or shutil.which("browser_use")
+    discovered = shutil.which("browser-use") or shutil.which("browser_use")
+    if discovered:
+        return discovered
+    executable_dir = Path(sys.executable).resolve().parent
+    for name in ("browser-use.exe", "browser_use.exe", "browser-use", "browser_use"):
+        candidate = executable_dir / name
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 def browser_use_package_available() -> bool:
