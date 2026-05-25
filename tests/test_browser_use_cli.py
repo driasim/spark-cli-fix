@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
@@ -302,6 +305,121 @@ class BrowserUseCliTests(unittest.TestCase):
 
         self.assertFalse(cli.browser_use_task_completed(payload))
         self.assertIn("fabricated", cli.browser_use_task_failure_reason(payload))
+
+    def test_normalizes_fenced_browser_use_agent_json(self) -> None:
+        normalized = cli.browser_use_normalize_structured_agent_json(
+            '```json\n{"memory":"ready","action":[{"done":{"answer":"Visible","success":true}}]}\n```'
+        )
+        payload = cli.json.loads(normalized)
+
+        self.assertEqual(payload["action"][0]["done"]["text"], "Visible")
+        self.assertNotIn("answer", payload["action"][0]["done"])
+
+    def test_normalizes_root_done_agent_json(self) -> None:
+        normalized = cli.browser_use_normalize_structured_agent_json(
+            '{"done":{"answer":"Visible","success":true}}'
+        )
+        payload = cli.json.loads(normalized)
+
+        self.assertEqual(payload["memory"], "Task result ready.")
+        self.assertEqual(payload["action"][0]["done"]["text"], "Visible")
+
+    def test_agent_task_uses_spark_stability_defaults(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeBrowser:
+            def __init__(self, **kwargs: object) -> None:
+                captured["browser_kwargs"] = kwargs
+                captured["browser"] = self
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        class FakeHistory:
+            def save_to_file(self, path: Path) -> None:
+                path.write_text("{}", encoding="utf-8")
+
+            def final_result(self) -> str:
+                return "Visible"
+
+            def extracted_content(self) -> list[str]:
+                return []
+
+            def errors(self) -> list[str]:
+                return []
+
+            def urls(self) -> list[str]:
+                return ["http://127.0.0.1:3333/canvas"]
+
+            def screenshot_paths(self) -> list[str]:
+                return []
+
+            def action_names(self) -> list[str]:
+                return ["navigate", "done"]
+
+            def number_of_steps(self) -> int:
+                return 2
+
+            def total_duration_seconds(self) -> float:
+                return 1.0
+
+            def is_done(self) -> bool:
+                return True
+
+            def is_successful(self) -> bool:
+                return True
+
+            def is_judged(self) -> bool:
+                return False
+
+            def is_validated(self) -> bool:
+                return False
+
+        class FakeAgent:
+            def __init__(self, **kwargs: object) -> None:
+                captured["agent_kwargs"] = kwargs
+
+            async def run(self, *, max_steps: int) -> FakeHistory:
+                captured["run_max_steps"] = max_steps
+                return FakeHistory()
+
+        fake_browser_use = types.SimpleNamespace(Agent=FakeAgent, Browser=FakeBrowser)
+        with tempfile.TemporaryDirectory() as tmp_dir, \
+             patch.dict(sys.modules, {"browser_use": fake_browser_use}), \
+             patch("spark_cli.cli.browser_use_agent_llm", return_value=("test-llm", "test-provider")):
+            history_path = Path(tmp_dir) / "history.json"
+            result = asyncio.run(
+                cli.run_browser_use_agent_task(
+                    "review the page",
+                    start_url="http://127.0.0.1:3333/canvas",
+                    max_steps=3,
+                    history_path=history_path,
+                )
+            )
+
+        agent_kwargs = captured["agent_kwargs"]
+        self.assertEqual(result["llm"], "test-provider")
+        self.assertEqual(captured["run_max_steps"], 3)
+        self.assertEqual(agent_kwargs["llm"], "test-llm")
+        self.assertEqual(agent_kwargs["max_actions_per_step"], 5)
+        self.assertTrue(agent_kwargs["flash_mode"])
+        self.assertFalse(agent_kwargs["include_tool_call_examples"])
+        self.assertFalse(agent_kwargs["use_thinking"])
+        self.assertFalse(agent_kwargs["use_judge"])
+        self.assertEqual(agent_kwargs["llm_screenshot_size"], cli.BROWSER_USE_AGENT_LLM_SCREENSHOT_SIZE)
+        self.assertFalse(agent_kwargs["enable_planning"])
+        self.assertIn("action schema", str(agent_kwargs["extend_system_message"]))
+        self.assertTrue(captured["browser"].closed)
+
+    def test_structured_llm_exposes_browser_use_model_attributes(self) -> None:
+        inner = types.SimpleNamespace(provider="openai", name="glm", model="openai/glm-5.1")
+        wrapper = cli.SparkBrowserUseStructuredLLM(inner)
+
+        self.assertEqual(wrapper.provider, "openai")
+        self.assertEqual(wrapper.name, "glm")
+        self.assertEqual(wrapper.model, "openai/glm-5.1")
+        self.assertEqual(wrapper.model_name, "openai/glm-5.1")
 
 
 if __name__ == "__main__":

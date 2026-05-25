@@ -108,6 +108,13 @@ BROWSER_USE_PROOF_TTL_SECONDS = 15 * 60
 BROWSER_USE_REQUIRED_PROOFS = {"doctor", "public_page_open", "screenshot_capture", "state_read"}
 BROWSER_USE_ACTION_TEXT_LIMIT = 1800
 BROWSER_USE_TASK_TEXT_LIMIT = 2600
+BROWSER_USE_AGENT_SYSTEM_NUDGE = (
+    "Spark wrapper instruction: every assistant response in the browser-use loop must use the "
+    "available action schema only. Do not answer with plain prose during intermediate steps. "
+    "When the requested browser work is complete, call the done action with a concise answer "
+    "grounded only in observed browser state."
+)
+BROWSER_USE_AGENT_LLM_SCREENSHOT_SIZE = (1400, 850)
 SAFE_PARENT_ENV_KEYS = {
     "APPDATA",
     "COMSPEC",
@@ -5979,7 +5986,13 @@ async def run_browser_use_agent_task(
             llm=llm,
             browser=browser,
             max_actions_per_step=5,
-            enable_planning=True,
+            extend_system_message=BROWSER_USE_AGENT_SYSTEM_NUDGE,
+            flash_mode=True,
+            include_tool_call_examples=False,
+            use_thinking=False,
+            use_judge=False,
+            llm_screenshot_size=BROWSER_USE_AGENT_LLM_SCREENSHOT_SIZE,
+            enable_planning=False,
         )
         history = await agent.run(max_steps=max_steps)
         if history_path is not None:
@@ -6008,16 +6021,88 @@ def browser_use_agent_llm() -> tuple[Any, str]:
         model = os.environ.get(spec.get("model_env", "")) or spec.get("model_default", "")
         api_base = os.environ.get(spec.get("base_url_env", "")) or spec.get("base_url_default", "")
         if provider == "anthropic":
-            return ChatLiteLLM(model=f"anthropic/{model}", api_key=api_key), provider
+            return SparkBrowserUseStructuredLLM(ChatLiteLLM(model=f"anthropic/{model}", api_key=api_key)), provider
         if provider == "openrouter":
-            return ChatLiteLLM(model=f"openrouter/{model}", api_key=api_key, api_base=api_base), provider
+            return SparkBrowserUseStructuredLLM(ChatLiteLLM(model=f"openrouter/{model}", api_key=api_key, api_base=api_base)), provider
         if provider == "openai":
-            return ChatLiteLLM(model=model, api_key=api_key, api_base=api_base), provider
-        return ChatLiteLLM(model=f"openai/{model}", api_key=api_key, api_base=api_base), provider
+            return SparkBrowserUseStructuredLLM(ChatLiteLLM(model=model, api_key=api_key, api_base=api_base)), provider
+        return SparkBrowserUseStructuredLLM(ChatLiteLLM(model=f"openai/{model}", api_key=api_key, api_base=api_base)), provider
 
     raise RuntimeError(
         "No browser-use Agent LLM key is configured. Set BROWSER_USE_API_KEY, or configure an OpenAI-compatible Spark provider key."
     )
+
+
+class SparkBrowserUseStructuredLLM:
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    @property
+    def provider(self) -> str:
+        return str(getattr(self.inner, "provider", "spark-browser-use"))
+
+    @property
+    def name(self) -> str:
+        return str(getattr(self.inner, "name", getattr(self.inner, "model", "spark-browser-use")))
+
+    @property
+    def model(self) -> str:
+        return str(getattr(self.inner, "model", self.name))
+
+    @property
+    def model_name(self) -> str:
+        return str(getattr(self.inner, "model_name", self.model))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    async def ainvoke(self, messages: list[Any], output_format: type[Any] | None = None, **kwargs: Any) -> Any:
+        if output_format is None:
+            return await self.inner.ainvoke(messages, output_format=None, **kwargs)
+
+        from browser_use.llm.views import ChatInvokeCompletion
+
+        completion = await self.inner.ainvoke(messages, output_format=None, **kwargs)
+        parsed = output_format.model_validate_json(
+            browser_use_normalize_structured_agent_json(str(getattr(completion, "completion", "") or ""))
+        )
+        return ChatInvokeCompletion(
+            completion=parsed,
+            thinking=getattr(completion, "thinking", None),
+            usage=getattr(completion, "usage", None),
+            stop_reason=getattr(completion, "stop_reason", None),
+        )
+
+
+def browser_use_normalize_structured_agent_json(raw: str) -> str:
+    text = raw.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    elif not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        return text
+
+    if "done" in payload and "action" not in payload:
+        payload = {"memory": str(payload.get("memory") or "Task result ready."), "action": [{"done": payload["done"]}]}
+    actions = payload.get("action")
+    if isinstance(actions, dict):
+        payload["action"] = [actions]
+        actions = payload["action"]
+    if isinstance(actions, list):
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            done = action.get("done")
+            if isinstance(done, dict) and "text" not in done and "answer" in done:
+                done["text"] = done.pop("answer")
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def browser_use_agent_history_payload(history: Any) -> dict[str, Any]:
