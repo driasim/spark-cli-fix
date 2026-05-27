@@ -417,9 +417,10 @@ class AccessSetupTests(unittest.TestCase):
         sh = (repo / "scripts" / "docker-dev-smoke.sh").read_text(encoding="utf-8")
 
         for source in (dockerfile, ps1, sh):
-            self.assertIn("tests/test_access.py tests/test_docker_entrypoint.py", source)
+            self.assertIn("tests/test_docker_entrypoint.py", source)
             self.assertIn("spark --help", source)
             self.assertNotIn("tests/test_cli.py -q", source)
+        self.assertIn("COPY docker ./docker", dockerfile)
 
 
 if __name__ == "__main__":

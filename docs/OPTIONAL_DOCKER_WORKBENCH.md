@@ -61,7 +61,7 @@ bash scripts/docker-dev-smoke.sh
 By default this builds `spark-cli-dev:local` and runs a bounded Docker smoke:
 
 ```bash
-python -m pytest tests/test_access.py tests/test_docker_entrypoint.py -q
+python -m pytest tests/test_docker_entrypoint.py -q
 spark --help >/tmp/spark-help.txt
 ```
 
