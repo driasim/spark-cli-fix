@@ -93,7 +93,13 @@ def bound_sandbox_output(
     next_text = "\n".join(lines[:max_lines])
     next_bytes = next_text.encode("utf-8", errors="replace")
     if len(next_bytes) > max_bytes:
-        next_text = next_bytes[:max_bytes].decode("utf-8", errors="ignore")
+        # Truncate on a clean UTF-8 boundary to avoid splitting multi-byte chars
+        truncated = next_bytes[:max_bytes]
+        while truncated and truncated[-1] & 0xC0 == 0x80:
+            truncated = truncated[:-1]
+        if truncated and truncated[-1] & 0x80 and not (truncated[-1] & 0x40):
+            truncated = truncated[:-1]
+        next_text = truncated.decode("utf-8", errors="replace")
     if truncated:
         next_text = f"{next_text}\n[output truncated]"
     return BoundedOutput(
