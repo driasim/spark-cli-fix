@@ -218,6 +218,7 @@ from spark_cli.cli import (
     listening_pid_for_tcp_port,
     remove_managed_env_block,
     pid_is_running,
+    pid_registry_errors,
     print_install_summary,
     process_runtime_detail,
     provider_secret_env_blocklist,
@@ -3012,6 +3013,15 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(statuses[0]["relay_port"], 8789)
         self.assertTrue(statuses[0]["primary"])
         self.assertTrue(statuses[0]["autostart"])
+
+    def test_telegram_profile_runtime_status_treats_null_pid_as_stopped(self) -> None:
+        setup_state = {"primary_telegram_profile": "qa-bot", "telegram_profiles": {"qa-bot": {"relay_port": 8789}}}
+        pids = {"spark-telegram-bot:qa-bot": {"pid": None}}
+
+        statuses = telegram_profile_runtime_status(setup_state, pids)
+
+        self.assertIsNone(statuses[0]["pid"])
+        self.assertFalse(statuses[0]["running"])
 
     def test_telegram_profile_runtime_status_marks_manual_profiles(self) -> None:
         setup_state = {
@@ -7728,6 +7738,21 @@ class SparkCliTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("spark-telegram-bot", detail)
         self.assertIn("spawner-ui (pid 102)", detail)
+
+    def test_process_runtime_detail_treats_null_pid_as_missing(self) -> None:
+        pids = {"spark-telegram-bot": {"pid": None}}
+
+        ok, detail = process_runtime_detail(pids, ["spark-telegram-bot"])
+
+        self.assertFalse(ok)
+        self.assertIn("spark-telegram-bot", detail)
+
+    def test_pid_registry_errors_treats_null_pid_as_empty(self) -> None:
+        with patch("spark_cli.cli.load_pids", return_value={"spawner-ui": {"pid": None}}), \
+             patch("spark_cli.cli.pid_is_running") as running:
+            self.assertEqual(pid_registry_errors(), [])
+
+        running.assert_not_called()
 
     def test_expected_runtime_process_names_includes_telegram_profiles(self) -> None:
         setup_state = {
