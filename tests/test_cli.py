@@ -3915,6 +3915,24 @@ class SparkCliTests(unittest.TestCase):
             "Spawner UI unhealthy: cannot reach http://127.0.0.1:3333/api/providers",
         )
 
+    def test_summarize_command_output_skips_node_runtime_warning_noise(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["dummy"],
+            returncode=1,
+            stdout="",
+            stderr="\n".join(
+                [
+                    "(node:1234) ExperimentalWarning: SQLite is an experimental feature and might change at any time",
+                    "(Use `node --trace-warnings ...` to show where the warning was created)",
+                    "Spawner UI unhealthy: cannot reach http://127.0.0.1:3333/api/providers",
+                ]
+            ),
+        )
+        self.assertEqual(
+            summarize_command_output(result),
+            "Spawner UI unhealthy: cannot reach http://127.0.0.1:3333/api/providers",
+        )
+
     def test_summarize_command_output_handles_missing_streams(self) -> None:
         result = subprocess.CompletedProcess(
             args=["dummy"],
@@ -6131,6 +6149,43 @@ class SparkCliTests(unittest.TestCase):
             self.assertEqual(graphiti["group_id"], "spark-memory")
             self.assertEqual(graphiti["db_path"], str(builder_home / "sidecars" / "graphiti" / "kuzu" / "graphiti.kuzu"))
             self.assertTrue((builder_home / "sidecars" / "graphiti" / "kuzu").exists())
+
+    def test_initialize_builder_runtime_home_hides_unexpected_exception_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            builder_root = tmp / "spark-intelligence-builder"
+            package_root = builder_root / "src" / "spark_intelligence"
+            package_root.mkdir(parents=True)
+            (package_root / "__init__.py").write_text("", encoding="utf-8")
+            (package_root / "attachments.py").write_text(
+                "raise RuntimeError('SPARK_OPENAI_API_KEY=leaky-secret')\n",
+                encoding="utf-8",
+            )
+            builder = Module(
+                name="spark-intelligence-builder",
+                path=builder_root,
+                manifest={"module": {"name": "spark-intelligence-builder", "version": "0.1.0"}},
+            )
+            spark_home = tmp / "spark-home"
+            state_dir = spark_home / "state"
+            saved_modules = {
+                key: value
+                for key, value in sys.modules.items()
+                if key == "spark_intelligence" or key.startswith("spark_intelligence.")
+            }
+            for key in list(saved_modules):
+                sys.modules.pop(key, None)
+            try:
+                with patch.multiple("spark_cli.cli", SPARK_HOME=spark_home, STATE_DIR=state_dir):
+                    notes = initialize_builder_runtime_home({"spark-intelligence-builder": builder})
+            finally:
+                for key in [key for key in sys.modules if key == "spark_intelligence" or key.startswith("spark_intelligence.")]:
+                    sys.modules.pop(key, None)
+                sys.modules.update(saved_modules)
+
+            self.assertIn("Builder runtime bootstrap failed: RuntimeError", notes)
+            self.assertFalse(any("leaky-secret" in note for note in notes))
+            self.assertFalse(any("SPARK_OPENAI_API_KEY" in note for note in notes))
 
     def test_voice_setup_secret_is_keychain_backed_for_builder_runtime(self) -> None:
         args = build_parser().parse_args(
