@@ -25,6 +25,7 @@ from spark_cli.cli import (
     apply_setup_feature_aliases,
     atomic_write_json,
     ALLOW_INSECURE_FILE_SECRETS_ENV,
+    PRIVATE_FILE_MODE,
     build_module_repair_hints,
     build_llm_env,
     build_parser,
@@ -258,8 +259,10 @@ from spark_cli.cli import (
     wait_for_ready_check,
     write_boundary_env,
     write_browser_use_screenshot,
+    write_doctor_report,
     write_denied_paths,
     write_denied_prefixes,
+    write_support_bundle,
     windows_service_creationflags,
     resolve_bundle_names,
     resolve_setup_bundle_plan,
@@ -1667,6 +1670,15 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(parsed["runtime"]["version"], ">=22")
         self.assertIn("node -e", parsed["healthcheck"]["command"])
 
+    def test_render_init_spark_toml_escapes_dynamic_strings(self) -> None:
+        import tomllib as _toml
+        description = "Demo \"quoted\"\nmodule with backslash \\"
+        parsed = _toml.loads(render_init_spark_toml("my-module", "python", description))
+        self.assertEqual(parsed["module"]["name"], "my-module")
+        self.assertEqual(parsed["module"]["description"], description)
+        self.assertEqual(parsed["healthcheck"]["success_hint"], "my-module is healthy.")
+        self.assertEqual(parsed["paths"]["home"], "~/.spark/modules/my-module")
+
     def test_scaffold_module_files_writes_expected_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             target = Path(tmp_dir) / "new-module"
@@ -2201,6 +2213,22 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("<spark-home>/config/secrets.local.json", checks["secret_file_permissions"]["repair"])
         self.assertNotIn("~/.spark/config/secrets.local.json", checks["secret_file_permissions"]["repair"])
 
+    def test_support_bundle_sets_private_file_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, \
+             patch("spark_cli.cli.SPARK_HOME", Path(tmp_dir)), \
+             patch("spark_cli.cli.os.chmod") as chmod:
+            path = write_support_bundle({"ok": True})
+
+        chmod.assert_called_once_with(path, PRIVATE_FILE_MODE)
+
+    def test_doctor_report_sets_private_file_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, \
+             patch("spark_cli.cli.SPARK_HOME", Path(tmp_dir)), \
+             patch("spark_cli.cli.os.chmod") as chmod:
+            path = write_doctor_report("redacted report")
+
+        chmod.assert_called_once_with(path, PRIVATE_FILE_MODE)
+
     def test_security_audit_flags_registry_provenance_failures(self) -> None:
         with patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean"}), \
              patch("spark_cli.cli.provider_status_payload", return_value={"ok": True, "summary": "providers ready"}), \
@@ -2734,6 +2762,18 @@ class SparkCliTests(unittest.TestCase):
     def test_url_policy_blocks_private_remote_targets(self) -> None:
         errors = validate_url_safety("http://10.0.0.8/v1", label="llm role chat")
         self.assertTrue(any("private network address" in error for error in errors))
+
+    def test_url_policy_blocks_cloud_metadata_hosts(self) -> None:
+        cases = [
+            "https://169.254.170.2/v2/credentials",
+            "https://metadata.amazonaws.com/latest/meta-data/",
+            "https://metadata.azure.com/metadata/instance",
+            "https://metadata.google.internal./computeMetadata/v1",
+        ]
+        for url in cases:
+            with self.subTest(url=url):
+                errors = validate_url_safety(url, label="provider endpoint")
+                self.assertTrue(any("cloud metadata service" in error for error in errors), errors)
 
     def test_url_policy_allows_local_provider_targets_by_default(self) -> None:
         errors = validate_url_safety("http://localhost:1234/v1", label="LM Studio")

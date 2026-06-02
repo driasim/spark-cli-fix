@@ -6575,6 +6575,23 @@ def browser_use_command_failure_message(exc: BaseException) -> str:
     return str(exc)[:500] or type(exc).__name__
 
 
+def browser_use_public_payload(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        public: dict[str, Any] = {}
+        for key, value in payload.items():
+            key_text = str(key)
+            if key_text == "cli_path" or key_text.endswith("_path"):
+                public[key_text] = public_local_path_ref(value)
+            elif key_text.endswith("_paths") and isinstance(value, list):
+                public[key_text] = [public_local_path_ref(item) for item in value]
+            else:
+                public[key_text] = browser_use_public_payload(value)
+        return public
+    if isinstance(payload, list):
+        return [browser_use_public_payload(item) for item in payload]
+    return payload
+
+
 def cmd_browser_use(args: argparse.Namespace) -> int:
     action = getattr(args, "browser_use_command", "status")
     if action == "status":
@@ -6637,7 +6654,7 @@ def cmd_browser_use(args: argparse.Namespace) -> int:
         payload = browser_use_probe_payload()
         status_payload = browser_use_status_payload()
         if getattr(args, "json", False):
-            print(json.dumps(status_payload | {"probe": payload}, indent=2))
+            print(json.dumps(browser_use_public_payload(status_payload | {"probe": payload}), indent=2))
             return 0 if status_payload["ok"] else 1
         if status_payload["ok"]:
             print("Browser-use is ready for the probed scope.")
@@ -6653,7 +6670,7 @@ def cmd_browser_use(args: argparse.Namespace) -> int:
     if action in {"open", "screenshot"}:
         payload = browser_use_action_payload(str(getattr(args, "url", "") or ""), screenshot=action == "screenshot" or bool(getattr(args, "screenshot", False)))
         if getattr(args, "json", False):
-            print(json.dumps(payload, indent=2))
+            print(json.dumps(browser_use_public_payload(payload), indent=2))
             return 0 if payload.get("ok") else 1
         if payload.get("ok"):
             print(f"Browser-use {payload['action']} succeeded.")
@@ -6679,7 +6696,7 @@ def cmd_browser_use(args: argparse.Namespace) -> int:
             max_steps=int(getattr(args, "max_steps", 25) or 25),
         )
         if getattr(args, "json", False):
-            print(json.dumps(payload, indent=2))
+            print(json.dumps(browser_use_public_payload(payload), indent=2))
             return 0 if payload.get("ok") else 1
         if payload.get("ok"):
             print("Browser-use task completed.")
@@ -8143,6 +8160,10 @@ def write_support_bundle(payload: dict[str, Any]) -> Path:
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("README.txt", readme)
         archive.writestr("support.json", json.dumps(payload, indent=2, sort_keys=True))
+    try:
+        os.chmod(path, PRIVATE_FILE_MODE)
+    except OSError:
+        pass
     return path
 
 
@@ -10827,6 +10848,10 @@ def write_doctor_report(content: str, *, prefix: str = "spark-doctor") -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     path = output_dir / f"{prefix}-{stamp}.md"
     path.write_text(content, encoding="utf-8")
+    try:
+        os.chmod(path, PRIVATE_FILE_MODE)
+    except OSError:
+        pass
     return path
 
 
@@ -15389,11 +15414,11 @@ def cmd_config_list(_: argparse.Namespace) -> int:
 
 
 INIT_SPARK_TOML_TEMPLATE = """[module]
-name = "{name}"
+name = {name}
 version = "0.1.0"
 kind = "service"
 plane = "execution"
-description = "{description}"
+description = {description}
 license = "UNLICENSED"
 
 [runtime]
@@ -15419,13 +15444,13 @@ routes = []
 [healthcheck]
 command = "{healthcheck_command}"
 timeout_seconds = 10
-success_hint = "{name} is healthy."
+success_hint = {success_hint}
 failure_hint = "Run the healthcheck command from the module home for detail."
 
 [paths]
-home = "~/.spark/modules/{name}"
-state = "~/.spark/state/{name}"
-logs = "~/.spark/logs/{name}"
+home = {home}
+state = {state}
+logs = {logs}
 """
 
 
@@ -15493,11 +15518,15 @@ def render_init_spark_toml(name: str, kind: str, description: str) -> str:
     else:
         raise SystemExit(f"Unsupported kind: {kind}. Use python or node.")
     return INIT_SPARK_TOML_TEMPLATE.format(
-        name=name,
-        description=description,
+        name=json.dumps(name),
+        description=json.dumps(description),
         runtime_kind=runtime_kind,
         runtime_version=runtime_version,
         healthcheck_command=healthcheck,
+        success_hint=json.dumps(f"{name} is healthy."),
+        home=json.dumps(f"~/.spark/modules/{name}"),
+        state=json.dumps(f"~/.spark/state/{name}"),
+        logs=json.dumps(f"~/.spark/logs/{name}"),
     )
 
 
