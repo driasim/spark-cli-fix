@@ -736,7 +736,7 @@ def update_module_source(module: Module) -> tuple[bool, str]:
         git_command("-C", str(module.path), "rev-parse", "HEAD"),
         capture_output=True,
         text=True,
-    )
+    , timeout=300)
     if current.returncode != 0:
         return False, summarize_command_output(current)
     current_commit = current.stdout.strip().lower()
